@@ -1,3 +1,19 @@
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 //
 // This script converts the CIFAR dataset to the leveldb format used
 // by caffe to perform classification.
@@ -6,6 +22,7 @@
 // The CIFAR dataset could be downloaded at
 //    http://www.cs.toronto.edu/~kriz/cifar.html
 
+#include <array>
 #include <fstream>  // NOLINT(readability/streams)
 #include <sstream>
 #include <string>
@@ -16,15 +33,14 @@
 #include "caffe2/proto/caffe2.pb.h"
 #include "caffe2/core/logging.h"
 
-CAFFE2_DEFINE_string(input_folder, "", "The input image file name.");
-CAFFE2_DEFINE_string(output_train_db_name, "", "The output training leveldb name.");
-CAFFE2_DEFINE_string(output_test_db_name, "", "The output testing leveldb name.");
+CAFFE2_DEFINE_string(input_folder, "", "The input folder name.");
+CAFFE2_DEFINE_string(output_train_db_name,
+                     "", "The output training db name.");
+CAFFE2_DEFINE_string(output_test_db_name,
+                     "", "The output testing db name.");
 CAFFE2_DEFINE_string(db, "leveldb", "The db type.");
 CAFFE2_DEFINE_bool(is_cifar100, false,
             "If set, convert cifar100. Otherwise do cifar10.");
-CAFFE2_DEFINE_bool(channel_first, false,
-            "If set, write the data as channel-first (CHW order) as the old "
-            "Caffe does.");
 
 namespace caffe2 {
 
@@ -47,18 +63,14 @@ void ReadImage(std::ifstream* file, int* label, char* buffer) {
   }
   file->read(&label_char, 1);
   *label = label_char;
-  if (caffe2::FLAGS_channel_first) {
-    file->read(buffer, kCIFARImageNBytes);
-  } else {
-    // Yes, there are better ways to do it, like in-place swap... but I am too
-    // lazy so let's just write it in a memory-wasteful way.
-    static char channel_first_storage[kCIFARImageNBytes];
-    file->read(channel_first_storage, kCIFARImageNBytes);
-    for (int c = 0; c < 3; ++c) {
-      for (int i = 0; i < kCIFARSize * kCIFARSize; ++i) {
-        buffer[i * 3 + c] =
-            channel_first_storage[c * kCIFARSize * kCIFARSize + i];
-      }
+  // Yes, there are better ways to do it, like in-place swap... but I am too
+  // lazy so let's just write it in a memory-wasteful way.
+  std::array<char, kCIFARImageNBytes> channel_first_storage;
+  file->read(channel_first_storage.data(), kCIFARImageNBytes);
+  for (int c = 0; c < 3; ++c) {
+    for (int i = 0; i < kCIFARSize * kCIFARSize; ++i) {
+      buffer[i * 3 + c] =
+          channel_first_storage[c * kCIFARSize * kCIFARSize + i];
     }
   }
   return;
@@ -70,25 +82,17 @@ void WriteToDB(const string& filename, const int num_items,
   TensorProto* data = protos.add_protos();
   TensorProto* label = protos.add_protos();
   data->set_data_type(TensorProto::BYTE);
-  if (caffe2::FLAGS_channel_first) {
-    data->add_dims(1);
-    data->add_dims(3);
-    data->add_dims(kCIFARSize);
-    data->add_dims(kCIFARSize);
-  } else {
-    data->add_dims(1);
-    data->add_dims(kCIFARSize);
-    data->add_dims(kCIFARSize);
-    data->add_dims(3);
-  }
+  data->add_dims(kCIFARSize);
+  data->add_dims(kCIFARSize);
+  data->add_dims(3);
   label->set_data_type(TensorProto::INT32);
   label->add_dims(1);
   label->add_int32_data(0);
 
-  CAFFE_LOG_INFO << "Converting file " << filename;
+  LOG(INFO) << "Converting file " << filename;
   std::ifstream data_file(filename.c_str(),
       std::ios::in | std::ios::binary);
-  CAFFE_CHECK(data_file) << "Unable to open file " << filename;
+  CAFFE_ENFORCE(data_file, "Unable to open file ", filename);
   char str_buffer[kCIFARImageNBytes];
   int label_value;
   string serialized_protos;
@@ -106,9 +110,11 @@ void WriteToDB(const string& filename, const int num_items,
 
 void ConvertCIFAR() {
   std::unique_ptr<db::DB> train_db(
-      db::CreateDB(caffe2::FLAGS_db, caffe2::FLAGS_output_train_db_name, db::NEW));
+      db::CreateDB(caffe2::FLAGS_db, caffe2::FLAGS_output_train_db_name,
+                   db::NEW));
   std::unique_ptr<db::DB> test_db(
-      db::CreateDB(caffe2::FLAGS_db, caffe2::FLAGS_output_test_db_name, db::NEW));
+      db::CreateDB(caffe2::FLAGS_db, caffe2::FLAGS_output_test_db_name,
+                   db::NEW));
 
   if (!caffe2::FLAGS_is_cifar100) {
     // This is cifar 10.
@@ -136,7 +142,7 @@ void ConvertCIFAR() {
 }  // namespace caffe2
 
 int main(int argc, char** argv) {
-  caffe2::GlobalInit(&argc, argv);
+  caffe2::GlobalInit(&argc, &argv);
   caffe2::ConvertCIFAR();
   return 0;
 }

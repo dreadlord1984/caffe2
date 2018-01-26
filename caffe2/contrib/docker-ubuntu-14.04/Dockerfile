@@ -42,9 +42,18 @@ RUN apt-get update && apt-get install -q -y \
   libopencv-dev \
   libprotobuf-dev \
   libsnappy-dev \
+  zlib1g-dev \
+  libbz2-dev \
   protobuf-compiler \
   python-dev \
   python-pip
+
+RUN cd /tmp && \
+  git clone https://github.com/facebook/rocksdb.git && \
+  cd /tmp/rocksdb && \
+  make && make install && \
+  cd / && \
+  rm -rf /tmp/rocksdb
 
 # Caffe2 works best with openmpi 1.8.5 or above (which has cuda support).
 # If you do not need openmpi, skip this step.
@@ -60,15 +69,16 @@ RUN cd /tmp && \
 
 # Caffe2 requires zeromq 4.0 or above, manually install.
 # If you do not need zeromq, skip this step.
-RUN cd /tmp && \
-  wget http://download.zeromq.org/zeromq-4.1.3.tar.gz && \
-  tar xzvf zeromq-4.1.3.tar.gz && \
-  cd /tmp/zeromq-4.1.3 && \
+RUN apt-get install -q -y autoconf libtool
+RUN mkdir /tmp/zeromq-build && \
+  cd /tmp/zeromq-build && \
+  wget https://github.com/zeromq/zeromq4-1/archive/v4.1.3.tar.gz && \
+  tar xzvf v4.1.3.tar.gz --strip 1 && \
+  ./autogen.sh && \
   ./configure --without-libsodium && \
   make && make install && \
   cd / && \
-  rm -rf /tmp/zeromq-4.1.3 && \
-  rm /tmp/zeromq-4.1.3.tar.gz
+  rm -rf /tmp/zeromq-build
 
 # pip self upgrade
 RUN pip install --upgrade pip

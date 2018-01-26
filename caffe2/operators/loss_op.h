@@ -1,109 +1,49 @@
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #ifndef CAFFE2_OPERATORS_LOSS_OP_H_
 #define CAFFE2_OPERATORS_LOSS_OP_H_
 
 #include "caffe2/core/context.h"
-#include "caffe2/core/operator.h"
-#include "caffe2/utils/math.h"
 #include "caffe2/core/logging.h"
+#include "caffe2/core/operator.h"
+#include "caffe2/operators/reduction_ops.h"
+#include "caffe2/operators/utility_ops.h"
+#include "caffe2/utils/math.h"
 
 namespace caffe2 {
 
-// AveragedLoss takes in the input and produces two outputs: one being the loss
-// value, and one being the gradient.
+// AveragedLoss takes in the input and produces the output loss value as
+// the average of the input.
 template <typename T, class Context>
-class AveragedLoss final : public Operator<Context> {
+class AveragedLoss final : public SumElementsOp<T, Context> {
  public:
-  USE_SIMPLE_CTOR_DTOR(AveragedLoss);
-  USE_OPERATOR_CONTEXT_FUNCTIONS;
-
-  bool RunOnDevice() override {
-    auto& X = Input(0);
-    auto* Loss = Output(0);
-    Loss->Reshape(std::vector<int>());
-    T* loss_data = Loss->template mutable_data<T>();
-    // Well... technically we won't need to sum and scale, but I am too lazy
-    // to write an average function.
-    math::Sum<T, Context>(
-        X.size(), X.template data<T>(), loss_data, &device_context_);
-    math::Scale<T, Context>(
-        1, static_cast<T>(1.) / X.size(), loss_data, loss_data,
-        &device_context_);
-    return true;
-  }
-
- protected:
-  // Input: X, output: Loss
-  INPUT_OUTPUT_STATS(1, 1, 1, 1);
-  DISABLE_COPY_AND_ASSIGN(AveragedLoss);
+  AveragedLoss(const OperatorDef& operator_def, Workspace* ws)
+      : SumElementsOp<T, Context>(operator_def, ws, true) {}
+  ~AveragedLoss() {}
 };
 
 template <typename T, class Context>
-class AveragedLossGradient final : public Operator<Context> {
+class AveragedLossGradient final : public SumElementsGradientOp<T, Context> {
  public:
-  USE_SIMPLE_CTOR_DTOR(AveragedLossGradient);
-  USE_OPERATOR_CONTEXT_FUNCTIONS;
-
-  bool RunOnDevice() override {
-    auto& X = Input(0);
-    auto* dX = Output(0);
-    dX->ReshapeLike(X);
-    math::Set<T, Context>(
-        dX->size(), static_cast<T>(1.) / X.size(), dX->template mutable_data<T>(),
-        &device_context_);
-    return true;
-  }
-
- protected:
-  // Input: X, output: dX
-  INPUT_OUTPUT_STATS(1, 1, 1, 1);
-  DISABLE_COPY_AND_ASSIGN(AveragedLossGradient);
+  AveragedLossGradient(const OperatorDef& operator_def, Workspace* ws)
+      : SumElementsGradientOp<T, Context>(operator_def, ws, true) {}
+  ~AveragedLossGradient() {}
 };
 
+} // namespace caffe2
 
-template <typename T, class Context>
-class WeightedSumLoss final : public Operator<Context> {
- public:
-  USE_SIMPLE_CTOR_DTOR(WeightedSumLoss);
-  USE_OPERATOR_CONTEXT_FUNCTIONS;
-
-  bool RunOnDevice() override {
-    auto& X = Input(0);
-    auto& W = Input(1);
-    CAFFE_DCHECK_EQ(X.size(), W.size());
-    auto* Loss = Output(0);
-    Loss->Reshape(std::vector<int>());
-    math::Dot<T, Context>(
-        X.size(), X.template data<T>(), W.template data<T>(),
-        Loss->template mutable_data<T>(), &device_context_);
-    return true;
-  }
-
- protected:
-  INPUT_OUTPUT_STATS(2, 2, 1, 1);
-  DISABLE_COPY_AND_ASSIGN(WeightedSumLoss);
-};
-
-
-template <typename T, class Context>
-class WeightedSumLossGradient final : public Operator<Context> {
- public:
-  USE_SIMPLE_CTOR_DTOR(WeightedSumLossGradient);
-  USE_OPERATOR_CONTEXT_FUNCTIONS;
-
-  bool RunOnDevice() override {
-    auto& W = Input(0);
-    auto* dX = Output(0);
-    dX->ReshapeLike(W);
-    dX->ShareData(W);
-    return true;
-  }
-
- protected:
-  INPUT_OUTPUT_STATS(1, 1, 1, 1);
-  DISABLE_COPY_AND_ASSIGN(WeightedSumLossGradient);
-};
-
-
-}  // namespace caffe2
-
-#endif  // CAFFE2_OPERATORS_LOSS_OP_H_
+#endif // CAFFE2_OPERATORS_LOSS_OP_H_

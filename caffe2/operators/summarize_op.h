@@ -1,3 +1,19 @@
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #ifndef CAFFE2_OPERATORS_SUMMARIZE_OP_H_
 #define CAFFE2_OPERATORS_SUMMARIZE_OP_H_
 
@@ -11,11 +27,6 @@ namespace caffe2 {
 
 constexpr char kSummaryzeOpExtension[] = ".summary";
 
-// Accumulate operator accumulates the input tensor to the output tensor. If the
-// output tensor already has the right size, we add to it; otherwise, we first
-// initialize the output tensor to all zeros, and then do accumulation. Any
-// further calls to the operator, given that no one else fiddles with the output
-// in the interim, will do simple accumulations.
 template <typename T, class Context>
 class SummarizeOp final : public Operator<Context> {
  public:
@@ -26,15 +37,26 @@ class SummarizeOp final : public Operator<Context> {
       // We will output to file instead of printing on screen.
       const string& target_folder = ws->RootFolder();
       // We will write each individual tensor to its individual file.
+      // Also, since the namescope is currently represented by "/", we will
+      // need to replace it with a symbol that does not conflict with the
+      // folder separator in Linux.
+      string proper_name = def.input(0);
+      std::replace(proper_name.begin(), proper_name.end(), '/', '#');
       log_file_.reset(new std::ofstream(
-          target_folder + "/" + def.input(0) + kSummaryzeOpExtension,
+          target_folder + "/" + proper_name + kSummaryzeOpExtension,
           std::ofstream::out | std::ofstream::trunc));
-      CAFFE_CHECK(log_file_->good())
-          << "Failed to open summarize file for tensor " << def.input(0)
-          << ". rdstate() = " << log_file_->rdstate();
+      CAFFE_ENFORCE(
+          log_file_->good(),
+          "Failed to open summarize file for tensor ",
+          def.input(0),
+          ". rdstate() = ",
+          log_file_->rdstate());
     }
   }
-  ~SummarizeOp() { if (to_file_) log_file_->close(); }
+  ~SummarizeOp() {
+    if (to_file_)
+      log_file_->close();
+  }
   USE_OPERATOR_CONTEXT_FUNCTIONS;
   bool RunOnDevice() override;
 
@@ -42,17 +64,14 @@ class SummarizeOp final : public Operator<Context> {
   static constexpr int MAX_IDX = 1;
   static constexpr int MEAN_IDX = 2;
   static constexpr int STD_IDX = 3;
+
   static constexpr int NUM_STATS = 4;
 
  protected:
   bool to_file_;
   std::unique_ptr<std::ofstream> log_file_;
-  // Input: X; output: if set, a summarized vector of shape 4, with the values
-  // being min, max, mean and std respectively.
-  INPUT_OUTPUT_STATS(1, 1, 0, 1);
-  DISABLE_COPY_AND_ASSIGN(SummarizeOp);
 };
 
-}  // namespace caffe2
+} // namespace caffe2
 
-#endif  // CAFFE2_OPERATORS_SUMMARIZE_OP_H_
+#endif // CAFFE2_OPERATORS_SUMMARIZE_OP_H_

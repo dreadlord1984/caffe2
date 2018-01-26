@@ -1,3 +1,19 @@
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #include "caffe2/core/context_gpu.h"
 #include "caffe2/operators/clip_op.h"
 
@@ -12,11 +28,14 @@ template <>
 __device__ float cuda_min(float x, float y) { return fminf(x, y); }
 template <>
 __device__ float cuda_max(float x, float y) { return fmaxf(x, y); }
+
+// Disabled since we don't use it right now.
+/*
 template <>
 __device__ double cuda_min(double x, double y) { return fmin(x, y); }
 template <>
 __device__ double cuda_max(double x, double y) { return fmax(x, y); }
-
+*/
 
 
 template <typename T>
@@ -41,10 +60,10 @@ template <>
 bool ClipOp<float, CUDAContext>::RunOnDevice() {
   auto& X = Input(0);
   auto* Y = Output(0);
-  CAFFE_DCHECK_GT(X.size(), 0);
-  Y->ReshapeLike(X);
+  CAFFE_ENFORCE_GT(X.size(), 0);
+  Y->ResizeLike(X);
   ClipKernel<<<CAFFE_GET_BLOCKS(X.size()), CAFFE_CUDA_NUM_THREADS,
-               0, device_context_.cuda_stream()>>>(
+               0, context_.cuda_stream()>>>(
       X.size(), min_, max_, X.data<float>(), Y->mutable_data<float>());
   return true;
 }
@@ -54,18 +73,16 @@ bool ClipGradientOp<float, CUDAContext>::RunOnDevice() {
   auto& Y = Input(0);
   auto& dY = Input(1);
   auto* dX = Output(0);
-  CAFFE_DCHECK_GT(Y.size(), 0);
-  CAFFE_DCHECK_EQ(dY.size(), Y.size());
-  dX->ReshapeLike(Y);
+  CAFFE_ENFORCE_GT(Y.size(), 0);
+  CAFFE_ENFORCE_EQ(dY.size(), Y.size());
+  dX->ResizeLike(Y);
   ClipGradientKernel<<<CAFFE_GET_BLOCKS(Y.size()), CAFFE_CUDA_NUM_THREADS,
-                       0, device_context_.cuda_stream()>>>(
+                       0, context_.cuda_stream()>>>(
       Y.size(), min_, max_, Y.data<float>(), dY.data<float>(),
       dX->mutable_data<float>());
   return true;
 }
 
-namespace {
 REGISTER_CUDA_OPERATOR(Clip, ClipOp<float, CUDAContext>);
 REGISTER_CUDA_OPERATOR(ClipGradient, ClipGradientOp<float, CUDAContext>);
-}  // namespace
 }  // namespace caffe2

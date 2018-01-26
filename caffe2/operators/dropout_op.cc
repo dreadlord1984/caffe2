@@ -1,3 +1,19 @@
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #include "caffe2/operators/dropout_op.h"
 
 namespace caffe2 {
@@ -6,13 +22,12 @@ template <>
 bool DropoutOp<float, CPUContext>::RunOnDevice() {
   auto& X = Input(0);
   auto* Y = Output(0);
-  auto* mask = Output(1);
-  Y->Reshape(X.dims());
-  mask->Reshape(X.dims());
-  CAFFE_DCHECK_GT(X.size(), 0);
+  Y->Resize(X.dims());
   if (is_test_) {
-    device_context_.Copy<float, CPUContext, CPUContext>(
-      X.size(), X.data<float>(), Y->mutable_data<float>());
+    if (Y != &X) {
+      context_.Copy<float, CPUContext, CPUContext>(
+          X.size(), X.data<float>(), Y->mutable_data<float>());
+    }
     return true;
   } else {
     float scale = 1. / (1. - ratio_);
@@ -21,8 +36,10 @@ bool DropoutOp<float, CPUContext>::RunOnDevice() {
     std::bernoulli_distribution dist(1. - ratio_);
     const float* Xdata = X.data<float>();
     float* Ydata = Y->mutable_data<float>();
+    auto mask = Output(1);
+    mask->Resize(X.dims());
     bool* mask_data = mask->mutable_data<bool>();
-    auto& gen = device_context_.RandGenerator();
+    auto& gen = context_.RandGenerator();
     for (int i = 0; i < X.size(); ++i) {
       mask_data[i] = dist(gen);
       Ydata[i] = Xdata[i] * scale * mask_data[i];
@@ -34,16 +51,17 @@ bool DropoutOp<float, CPUContext>::RunOnDevice() {
 template <>
 bool DropoutGradientOp<float, CPUContext>::RunOnDevice() {
   auto& dY = Input(0);
-  auto& mask = Input(1);
   auto* dX = Output(0);
-  CAFFE_DCHECK_GT(dY.size(), 0);
-  CAFFE_DCHECK_EQ(dY.size(), mask.size());
-  dX->Reshape(dY.dims());
+  dX->Resize(dY.dims());
   if (is_test_) {
-    device_context_.Copy<float, CPUContext, CPUContext>(
-      dY.size(), dY.data<float>(), dX->mutable_data<float>());
+    if (dX != &dY) {
+      context_.Copy<float, CPUContext, CPUContext>(
+          dY.size(), dY.data<float>(), dX->mutable_data<float>());
+    }
     return true;
   } else {
+    auto& mask = Input(1);
+    CAFFE_ENFORCE_EQ(dY.size(), mask.size());
     const float* dYdata = dY.data<float>();
     const bool* mask_data = mask.data<bool>();
     float* dXdata = dX->mutable_data<float>();
@@ -55,19 +73,65 @@ bool DropoutGradientOp<float, CPUContext>::RunOnDevice() {
   }
 }
 
-
-namespace {
 REGISTER_CPU_OPERATOR(Dropout, DropoutOp<float, CPUContext>);
 REGISTER_CPU_OPERATOR(DropoutGrad, DropoutGradientOp<float, CPUContext>);
 
-struct GetDropoutGradient : public GetGradientDefBase {
-  vector<OperatorDef>* Create(const OperatorDef& def) override {
-    return SingleGradientDef(
-        "DropoutGrad", "",
-        vector<string>{GO(def, 0), O(def, 1)},
-        vector<string>{GI(def, 0)});
+OPERATOR_SCHEMA(Dropout)
+    .NumInputs(1)
+    .NumOutputs(1, 2)
+    .AllowInplace({{0, 0}})
+    .TensorInferenceFunction([](const OperatorDef& def,
+                                const vector<TensorShape>& in) {
+      CAFFE_ENFORCE_EQ(1, in.size());
+      vector<TensorShape> out;
+      ArgumentHelper argsHelper(def);
+      out.push_back(in[0]);
+      auto output_mask = !argsHelper.GetSingleArgument<bool>("is_test", 0);
+      if (output_mask) {
+        out.push_back(in[0]);
+        out[1].set_data_type(TensorProto_DataType_BOOL);
+      }
+      return out;
+    })
+    .SetDoc(R"DOC(
+Dropout takes one input data (Tensor<float>) and produces two Tensor outputs,
+output (Tensor<float>) and mask (Tensor<bool>). Depending on whether it is in
+test mode or not, the output Y will either be a random dropout, or a simple
+copy of the input. Note that our implementation of Dropout does scaling in
+the training phase, so during testing nothing needs to be done.
+)DOC")
+    .Arg("ratio", "(float, default 0.5) the ratio of random dropout")
+    .ArgIsTest(
+        "(int) if nonzero, run dropout in test mode where "
+        "the output is simply Y = X.")
+    .Input(0, "data", "The input data as Tensor.")
+    .Output(0, "output", "The output.")
+    .Output(
+        1,
+        "mask",
+        "The output mask. If is_test is nonzero, this output is not filled.");
+
+OPERATOR_SCHEMA(DropoutGrad)
+    .NumInputs(1, 2)
+    .NumOutputs(1)
+    .AllowInplace({{0, 0}});
+
+class GetDropoutGradient : public GradientMakerBase {
+  using GradientMakerBase::GradientMakerBase;
+  vector<OperatorDef> GetGradientDefs() override {
+    ArgumentHelper argshelper(def_);
+    auto is_test = argshelper.GetSingleArgument<bool>("is_test", 0);
+    if (is_test) {
+      return SingleGradientDef(
+          "DropoutGrad", "", vector<string>{GO(0)}, vector<string>{GI(0)});
+    } else {
+      return SingleGradientDef(
+          "DropoutGrad",
+          "",
+          vector<string>{GO(0), O(1)},
+          vector<string>{GI(0)});
+    }
   }
 };
 REGISTER_GRADIENT(Dropout, GetDropoutGradient);
-}  // namespace
-}  // namespace caffe2
+} // namespace caffe2

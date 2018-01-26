@@ -1,11 +1,56 @@
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#include "caffe2/core/flags.h"
+
 #include <cstdlib>
 #include <sstream>
 
-#include "caffe2/core/flags.h"
 #include "caffe2/core/logging.h"
 
 namespace caffe2 {
-DEFINE_REGISTRY(Caffe2FlagsRegistry, Caffe2FlagParser, const string&);
+
+#ifdef CAFFE2_USE_GFLAGS
+
+void SetUsageMessage(const string& str) {
+  if (UsageMessage() != nullptr) {
+    // Usage message has already been set, so we will simply return.
+    return;
+  }
+  gflags::SetUsageMessage(str);
+}
+
+const char* UsageMessage() {
+  return gflags::ProgramUsage();
+}
+
+bool ParseCaffeCommandLineFlags(int* pargc, char*** pargv) {
+  if (*pargc == 0) return true;
+  return gflags::ParseCommandLineFlags(pargc, pargv, true);
+}
+
+bool CommandLineFlagsHasBeenParsed() {
+  // There is no way we query gflags right now, so we will simply return true.
+  return true;
+}
+
+#else  // CAFFE2_USE_GFLAGS
+
+
+CAFFE_DEFINE_REGISTRY(Caffe2FlagsRegistry, Caffe2FlagParser, const string&);
 
 namespace {
 static bool gCommandLineFlagsParsed = false;
@@ -21,9 +66,11 @@ static string gUsageMessage = "(Usage message not set.)";
 
 
 void SetUsageMessage(const string& str) { gUsageMessage = str; }
-const string& UsageMessage() { return gUsageMessage; }
+const char* UsageMessage() { return gUsageMessage.c_str(); }
 
-bool ParseCaffeCommandLineFlags(int* pargc, char** argv) {
+bool ParseCaffeCommandLineFlags(int* pargc, char*** pargv) {
+  if (*pargc == 0) return true;
+  char** argv = *pargv;
   bool success = true;
   GlobalInitStream() << "Parsing commandline arguments for caffe2."
                      << std::endl;
@@ -32,7 +79,7 @@ bool ParseCaffeCommandLineFlags(int* pargc, char** argv) {
   for (int i = 1; i < *pargc; ++i) {
     string arg(argv[i]);
 
-    if (arg == "--help") {
+    if (arg.find("--help") != string::npos) {
       // Print the help message, and quit.
       std::cout << UsageMessage() << std::endl;
       std::cout << "Arguments: " << std::endl;
@@ -128,6 +175,24 @@ bool Caffe2FlagParser::Parse<int>(const string& content, int* value) {
 }
 
 template <>
+bool Caffe2FlagParser::Parse<int64_t>(const string& content, int64_t* value) {
+  try {
+    static_assert(sizeof(long long) == sizeof(int64_t), "");
+#ifdef __ANDROID__
+    // Android does not have std::atoll.
+    *value = atoll(content.c_str());
+#else
+    *value = std::atoll(content.c_str());
+#endif
+    return true;
+  } catch (...) {
+    GlobalInitStream() << "Caffe2 flag error: Cannot convert argument to int: "
+                       << content << std::endl;
+    return false;
+  }
+}
+
+template <>
 bool Caffe2FlagParser::Parse<double>(const string& content, double* value) {
   try {
     *value = std::atof(content.c_str());
@@ -163,5 +228,6 @@ bool Caffe2FlagParser::Parse<bool>(const string& content, bool* value) {
   }
 }
 
+#endif  // CAFFE2_USE_GFLAGS
 
 }  // namespace caffe2

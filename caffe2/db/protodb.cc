@@ -1,3 +1,19 @@
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #include <unordered_set>
 
 #include "caffe2/core/db.h"
@@ -12,6 +28,11 @@ class ProtoDBCursor : public Cursor {
   explicit ProtoDBCursor(const TensorProtos* proto)
     : proto_(proto), iter_(0) {}
   ~ProtoDBCursor() {}
+
+  void Seek(const string& /*str*/) override {
+    CAFFE_THROW("ProtoDB is not designed to support seeking.");
+  }
+
   void SeekToFirst() override { iter_ = 0; }
   void Next() override { ++iter_; }
   string key() override { return proto_->protos(iter_).name(); }
@@ -34,13 +55,18 @@ class ProtoDBTransaction : public Transaction {
   ~ProtoDBTransaction() { Commit(); }
   void Put(const string& key, const string& value) override {
     if (existing_names_.count(key)) {
-      CAFFE_LOG_FATAL << "An item with key " << key << " already exists.";
+      CAFFE_THROW("An item with key ", key, " already exists.");
     }
     auto* tensor = proto_->add_protos();
-    CAFFE_CHECK(tensor->ParseFromString(value));
-    CAFFE_CHECK_EQ(tensor->name(), key)
-        << "Passed in key " << key << " does not equal to the tensor name "
-        << tensor->name();
+    CAFFE_ENFORCE(
+        tensor->ParseFromString(value),
+        "Cannot parse content from the value string.");
+    CAFFE_ENFORCE(
+        tensor->name() == key,
+        "Passed in key ",
+        key,
+        " does not equal to the tensor name ",
+        tensor->name());
   }
   // Commit does nothing. The protocol buffer will be written at destruction
   // of ProtoDB.
@@ -59,9 +85,10 @@ class ProtoDB : public DB {
       : DB(source, mode), proto_(), source_(source) {
     if (mode == READ || mode == WRITE) {
       // Read the current protobuffer.
-      CAFFE_CHECK(ReadProtoFromFile(source, &proto_));
+      CAFFE_ENFORCE(
+          ReadProtoFromFile(source, &proto_), "Cannot read protobuffer.");
     }
-    CAFFE_LOG_INFO << "Opened protodb " << source;
+    LOG(INFO) << "Opened protodb " << source;
   }
   ~ProtoDB() { Close(); }
 
@@ -71,11 +98,11 @@ class ProtoDB : public DB {
     }
   }
 
-  Cursor* NewCursor() override {
-    return new ProtoDBCursor(&proto_);
+  unique_ptr<Cursor> NewCursor() override {
+    return make_unique<ProtoDBCursor>(&proto_);
   }
-  Transaction* NewTransaction() override {
-    return new ProtoDBTransaction(&proto_);
+  unique_ptr<Transaction> NewTransaction() override {
+    return make_unique<ProtoDBTransaction>(&proto_);
   }
 
  private:

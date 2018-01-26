@@ -1,20 +1,30 @@
 # Caffe2
 
-Caffe2 is a deep learning framework made with expression, speed, and modularity in mind. It is an experimental refactoring of Caffe, and allows a more flexible way to organize computation.
+[![License](https://img.shields.io/badge/License-Apache%202.0-brightgreen.svg)](https://opensource.org/licenses/Apache-2.0)
+[![Jenkins Build Status](https://ci.pytorch.org/jenkins/job/caffe2-master/badge/icon)](https://ci.pytorch.org/jenkins/job/caffe2-master)
+[![Appveyor Build Status](https://img.shields.io/appveyor/ci/Yangqing/caffe2.svg)](https://ci.appveyor.com/project/Yangqing/caffe2)
 
-Read [the installation instructions](https://github.com/Yangqing/caffe2/blob/master/docs/installation.md) for installation details.
+Caffe2 is a lightweight, modular, and scalable deep learning framework. Building on the original [Caffe](http://caffe.berkeleyvision.org), Caffe2 is designed with expression, speed, and modularity in mind.
 
-## What Caffe2 is and what it is not
+## Questions and Feedback
 
-Caffe2 started as an attempt to improve the design of caffe, because we have learned quite a lot since the 2 years of running and using caffe. It is also aiming to make Caffe more general, not only focusing on vision but applicable to all kinds of machine learning tasks.
+Please use Github issues (https://github.com/caffe2/caffe2/issues) to ask questions, report bugs, and request new features.
 
-Some highlights of the Caffe refactoring idea can also be found at [the slides from the CVPR caffe tutorial](http://tutorial.caffe.berkeleyvision.org/caffe-cvpr15-improving.pdf).
+Please participate in our survey (https://www.surveymonkey.com/r/caffe2). We will send you information about new releases and special developer events/webinars.
 
-Note that this is not meant for a complete replacement for Caffe right now. You are more than welcome to try it and we appreciate much if you could contribute back, but a lot of things may still be missing (e.g. CuDNN) so expect a few bumps as an early adopter. Caffe is still stably supported and for a production environment you may want to continue using it.
 
-I (Yangqing) would also like to personally thank Google, my current employer, to allow me to continue devoting my personal time to work on open-source projects like Caffe.
+## License
 
-## License and Citation
+Caffe2 is released under the [Apache 2.0 license](https://github.com/caffe2/caffe2/blob/master/LICENSE). See the [NOTICE](https://github.com/caffe2/caffe2/blob/master/NOTICE) file for details.
 
-Caffe2 is released under the [BSD 2-Clause license](https://github.com/Yangqing/caffe2/blob/master/LICENSE).
+### Further Resources on [Caffe2.ai](http://caffe2.ai)
 
+* [Installation](http://caffe2.ai/docs/getting-started.html)
+* [Learn More](http://caffe2.ai/docs/learn-more.html)
+* [Upgrading to Caffe2](http://caffe2.ai/docs/caffe-migration.html)
+* [Datasets](http://caffe2.ai/docs/datasets.html)
+* [Model Zoo](http://caffe2.ai/docs/zoo.html)
+* [Tutorials](http://caffe2.ai/docs/tutorials.html)
+* [Operators Catalogue](http://caffe2.ai/docs/operators-catalogue.html)
+* [C++ API](http://caffe2.ai/doxygen-c/html/classes.html)
+* [Python API](http://caffe2.ai/doxygen-python/html/namespaces.html)

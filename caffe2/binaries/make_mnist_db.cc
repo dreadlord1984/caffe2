@@ -1,3 +1,19 @@
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 // This script converts the MNIST dataset to leveldb.
 // The MNIST dataset could be downloaded at
 //    http://yann.lecun.com/exdb/mnist/
@@ -32,8 +48,8 @@ void convert_dataset(const char* image_filename, const char* label_filename,
   // Open files
   std::ifstream image_file(image_filename, std::ios::in | std::ios::binary);
   std::ifstream label_file(label_filename, std::ios::in | std::ios::binary);
-  CAFFE_CHECK(image_file) << "Unable to open file " << image_filename;
-  CAFFE_CHECK(label_file) << "Unable to open file " << label_filename;
+  CAFFE_ENFORCE(image_file, "Unable to open file ", image_filename);
+  CAFFE_ENFORCE(label_file, "Unable to open file ", label_filename);
   // Read the magic and the meta data
   uint32_t magic;
   uint32_t num_items;
@@ -43,15 +59,20 @@ void convert_dataset(const char* image_filename, const char* label_filename,
 
   image_file.read(reinterpret_cast<char*>(&magic), 4);
   magic = swap_endian(magic);
-  CAFFE_CHECK_EQ(magic, 2051) << "Incorrect image file magic.";
+  if (magic == 529205256) {
+    LOG(FATAL) << 
+        "It seems that you forgot to unzip the mnist dataset. You should "
+        "first unzip them using e.g. gunzip on Linux.";
+  }
+  CAFFE_ENFORCE_EQ(magic, 2051, "Incorrect image file magic.");
   label_file.read(reinterpret_cast<char*>(&magic), 4);
   magic = swap_endian(magic);
-  CAFFE_CHECK_EQ(magic, 2049) << "Incorrect label file magic.";
+  CAFFE_ENFORCE_EQ(magic, 2049, "Incorrect label file magic.");
   image_file.read(reinterpret_cast<char*>(&num_items), 4);
   num_items = swap_endian(num_items);
   label_file.read(reinterpret_cast<char*>(&num_labels), 4);
   num_labels = swap_endian(num_labels);
-  CAFFE_CHECK_EQ(num_items, num_labels);
+  CAFFE_ENFORCE_EQ(num_items, num_labels);
   image_file.read(reinterpret_cast<char*>(&rows), 4);
   rows = swap_endian(rows);
   image_file.read(reinterpret_cast<char*>(&cols), 4);
@@ -74,21 +95,18 @@ void convert_dataset(const char* image_filename, const char* label_filename,
   data->set_data_type(TensorProto::BYTE);
   if (caffe2::FLAGS_channel_first) {
     data->add_dims(1);
-    data->add_dims(1);
     data->add_dims(rows);
     data->add_dims(cols);
   } else {
-    data->add_dims(1);
     data->add_dims(rows);
     data->add_dims(cols);
     data->add_dims(1);
   }
   label->set_data_type(TensorProto::INT32);
-  label->add_dims(1);
   label->add_int32_data(0);
 
-  CAFFE_LOG_INFO << "A total of " << num_items << " items.";
-  CAFFE_LOG_INFO << "Rows: " << rows << " Cols: " << cols;
+  LOG(INFO) << "A total of " << num_items << " items.";
+  LOG(INFO) << "Rows: " << rows << " Cols: " << cols;
   for (int item_id = 0; item_id < num_items; ++item_id) {
     image_file.read(pixels.data(), rows * cols);
     label_file.read(&label_value, 1);
@@ -106,7 +124,7 @@ void convert_dataset(const char* image_filename, const char* label_filename,
       transaction->Commit();
     }
     if (data_limit > 0 && count == data_limit) {
-      CAFFE_LOG_INFO << "Reached data limit of " << data_limit << ", stop.";
+      LOG(INFO) << "Reached data limit of " << data_limit << ", stop.";
       break;
     }
   }
@@ -114,7 +132,7 @@ void convert_dataset(const char* image_filename, const char* label_filename,
 }  // namespace caffe2
 
 int main(int argc, char** argv) {
-  caffe2::GlobalInit(&argc, argv);
+  caffe2::GlobalInit(&argc, &argv);
   caffe2::convert_dataset(caffe2::FLAGS_image_file.c_str(), caffe2::FLAGS_label_file.c_str(),
                           caffe2::FLAGS_output_file.c_str(), caffe2::FLAGS_data_limit);
   return 0;

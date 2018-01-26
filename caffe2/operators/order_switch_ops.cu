@@ -1,3 +1,19 @@
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #include "caffe2/operators/order_switch_ops.h"
 #include "caffe2/core/context_gpu.h"
 
@@ -27,11 +43,11 @@ template <>
 bool NHWC2NCHWOp<float, CUDAContext>::RunOnDevice() {
   auto& X = Input(0);
   auto* Y = Output(0);
-  CAFFE_DCHECK_EQ(X.ndim(), 4);
-  const int N = X.dim(0), H = X.dim(1), W = X.dim(2), C = X.dim(3);
-  Y->Reshape(N, C, H, W);
+  DCHECK_EQ(X.ndim(), 4);
+  const int N = X.dim32(0), H = X.dim32(1), W = X.dim32(2), C = X.dim32(3);
+  Y->Resize(N, C, H, W);
   NHWC2NCHWKernel<<<CAFFE_GET_BLOCKS(X.size()), CAFFE_CUDA_NUM_THREADS,
-                    0, device_context_.cuda_stream()>>>(
+                    0, context_.cuda_stream()>>>(
       N, H * W, C, X.data<float>(), Y->mutable_data<float>());
   return true;
 }
@@ -40,18 +56,16 @@ template <>
 bool NCHW2NHWCOp<float, CUDAContext>::RunOnDevice() {
   auto& X = Input(0);
   auto* Y = Output(0);
-  CAFFE_DCHECK_EQ(X.ndim(), 4);
-  const int N = X.dim(0), C = X.dim(1), H = X.dim(2), W = X.dim(3);
-  Y->Reshape(N, H, W, C);
+  DCHECK_EQ(X.ndim(), 4);
+  const int N = X.dim32(0), C = X.dim32(1), H = X.dim32(2), W = X.dim32(3);
+  Y->Resize(N, H, W, C);
   NCHW2NHWCKernel<<<CAFFE_GET_BLOCKS(X.size()), CAFFE_CUDA_NUM_THREADS,
-                    0, device_context_.cuda_stream()>>>(
+                    0, context_.cuda_stream()>>>(
       N, C, H * W, X.data<float>(), Y->mutable_data<float>());
   return true;
 }
 
 
-namespace {
 REGISTER_CUDA_OPERATOR(NHWC2NCHW, NHWC2NCHWOp<float, CUDAContext>);
 REGISTER_CUDA_OPERATOR(NCHW2NHWC, NCHW2NHWCOp<float, CUDAContext>);
-}  // namespace
 }  // namespace caffe2

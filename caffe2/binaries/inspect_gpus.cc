@@ -1,4 +1,19 @@
-#include <cuda.h>
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #include <cuda_runtime.h>
 
 #include <sstream>
@@ -13,22 +28,20 @@ using std::vector;
 CAFFE2_DECLARE_int(caffe2_log_level);
 
 int main(int argc, char** argv) {
+  caffe2::GlobalInit(&argc, &argv);
   caffe2::SetUsageMessage(
       "Inspects the GPUs on the current machine and prints out their details "
       "provided by cuda.");
-  caffe2::GlobalInit(&argc, argv);
-  // Set log level to CAFFE_INFO since things will be printed there.
-  caffe2::FLAGS_caffe2_log_level = CAFFE_INFO;
 
   int gpu_count;
-  CUDA_CHECK(cudaGetDeviceCount(&gpu_count));
+  CUDA_ENFORCE(cudaGetDeviceCount(&gpu_count));
   for (int i = 0; i < gpu_count; ++i) {
-    CAFFE_LOG_INFO << "Querying device ID = " << i;
+    LOG(INFO) << "Querying device ID = " << i;
     caffe2::DeviceQuery(i);
   }
 
   vector<vector<bool> > access_pattern;
-  CAFFE_CHECK(caffe2::GetCudaPeerAccessPattern(&access_pattern));
+  CAFFE_ENFORCE(caffe2::GetCudaPeerAccessPattern(&access_pattern));
 
   std::stringstream sstream;
   // Find topology
@@ -38,7 +51,7 @@ int main(int argc, char** argv) {
     }
     sstream << std::endl;
   }
-  CAFFE_LOG_INFO << "Access pattern: " << std::endl << sstream.str();
+  LOG(INFO) << "Access pattern: " << std::endl << sstream.str();
 
   return 0;
 }

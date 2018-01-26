@@ -1,3 +1,19 @@
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #ifndef CAFFE2_UTILS_ZMQ_HELPER_H_
 #define CAFFE2_UTILS_ZMQ_HELPER_H_
 
@@ -10,15 +26,15 @@ namespace caffe2 {
 class ZmqContext {
  public:
   explicit ZmqContext(int io_threads) : ptr_(zmq_ctx_new()) {
-    CAFFE_CHECK(ptr_ != nullptr) << "Failed to create zmq context.";
+    CAFFE_ENFORCE(ptr_ != nullptr, "Failed to create zmq context.");
     int rc = zmq_ctx_set(ptr_, ZMQ_IO_THREADS, io_threads);
-    CAFFE_CHECK_EQ(rc, 0);
+    CAFFE_ENFORCE_EQ(rc, 0);
     rc = zmq_ctx_set(ptr_, ZMQ_MAX_SOCKETS, ZMQ_MAX_SOCKETS_DFLT);
-    CAFFE_CHECK_EQ(rc, 0);
+    CAFFE_ENFORCE_EQ(rc, 0);
   }
   ~ZmqContext() {
     int rc = zmq_ctx_destroy(ptr_);
-    CAFFE_CHECK_EQ(rc, 0);
+    CAFFE_ENFORCE_EQ(rc, 0);
   }
 
   void* ptr() { return ptr_; }
@@ -33,12 +49,12 @@ class ZmqMessage {
  public:
   ZmqMessage() {
     int rc = zmq_msg_init(&msg_);
-    CAFFE_CHECK_EQ(rc, 0);
+    CAFFE_ENFORCE_EQ(rc, 0);
   }
 
   ~ZmqMessage() {
     int rc = zmq_msg_close(&msg_);
-    CAFFE_CHECK_EQ(rc, 0);
+    CAFFE_ENFORCE_EQ(rc, 0);
   }
 
   zmq_msg_t* msg() { return &msg_; }
@@ -55,32 +71,32 @@ class ZmqSocket {
  public:
   explicit ZmqSocket(int type)
       : context_(1), ptr_(zmq_socket(context_.ptr(), type)) {
-    CAFFE_CHECK(ptr_ != nullptr) << "Faild to create zmq socket.";
+    CAFFE_ENFORCE(ptr_ != nullptr, "Faild to create zmq socket.");
   }
 
   ~ZmqSocket() {
     int rc = zmq_close(ptr_);
-    CAFFE_CHECK_EQ(rc, 0);
+    CAFFE_ENFORCE_EQ(rc, 0);
   }
 
   void Bind(const string& addr) {
     int rc = zmq_bind(ptr_, addr.c_str());
-    CAFFE_CHECK_EQ(rc, 0);
+    CAFFE_ENFORCE_EQ(rc, 0);
   }
 
   void Unbind(const string& addr) {
     int rc = zmq_unbind(ptr_, addr.c_str());
-    CAFFE_CHECK_EQ(rc, 0);
+    CAFFE_ENFORCE_EQ(rc, 0);
   }
 
   void Connect(const string& addr) {
     int rc = zmq_connect(ptr_, addr.c_str());
-    CAFFE_CHECK_EQ(rc, 0);
+    CAFFE_ENFORCE_EQ(rc, 0);
   }
 
   void Disconnect(const string& addr) {
     int rc = zmq_disconnect(ptr_, addr.c_str());
-    CAFFE_CHECK_EQ(rc, 0);
+    CAFFE_ENFORCE_EQ(rc, 0);
   }
 
   int Send(const string& msg, int flags) {
@@ -90,14 +106,14 @@ class ZmqSocket {
     } else if (zmq_errno() == EAGAIN) {
       return 0;
     } else {
-      CAFFE_LOG_FATAL << "Cannot send zmq message. Error number: "
+      LOG(FATAL) << "Cannot send zmq message. Error number: "
                       << zmq_errno();
       return 0;
     }
   }
 
   int SendTillSuccess(const string& msg, int flags) {
-    CAFFE_CHECK(msg.size()) << "You cannot send an empty message.";
+    CAFFE_ENFORCE(msg.size(), "You cannot send an empty message.");
     int nbytes = 0;
     do {
       nbytes = Send(msg, flags);
@@ -112,7 +128,7 @@ class ZmqSocket {
     } else if (zmq_errno() == EAGAIN || zmq_errno() == EINTR) {
       return 0;
     } else {
-      CAFFE_LOG_FATAL << "Cannot receive zmq message. Error number: "
+      LOG(FATAL) << "Cannot receive zmq message. Error number: "
                       << zmq_errno();
       return 0;
     }

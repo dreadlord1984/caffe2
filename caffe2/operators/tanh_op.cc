@@ -1,54 +1,86 @@
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #include <cmath>
 
 #include "caffe2/operators/elementwise_op.h"
+#include "caffe2/utils/math.h"
 
 namespace caffe2 {
 
-template <typename T>
 struct TanhCPUFunctor {
-  inline void operator()(const int n, const T* x,
-                         T* y, CPUContext* device_context) {
-    for (int i = 0; i < n; ++i) {
-      y[i] = tanh(x[i]);
-    }
-  }
-  inline bool InplaceAllowed() {
-    return true;
+  template <typename T>
+  inline void
+  operator()(const int n, const T* x, T* y, CPUContext* /*device_context*/) {
+#ifdef CAFFE2_USE_ACCELERATE
+    vvtanhf(y, x, &n);
+#else
+    ConstEigenVectorArrayMap<T> x_arr(x, n);
+    EigenVectorMap<T>(y, n) = 1 - 2 * ((x_arr * 2).exp() + 1).inverse();
+#endif
   }
 };
 
-template <typename T>
 struct TanhGradientCPUFunctor {
-  inline void operator()(const int n, const T* y, const T* dy,
-                         T* dx, CPUContext* device_context) {
-    for (int i = 0; i < n; ++i) {
-      dx[i] = dy[i] * (1 - y[i] * y[i]);
-    }
-  }
-  inline bool InplaceAllowed(const int input_id, const int output_id) {
-    if (input_id == 1 && output_id == 0) {
-      return true;
-    } else {
-      return false;
-    }
+  template <typename T>
+  inline void Run(
+      const int n,
+      const T* y,
+      const T* dy,
+      T* dx,
+      CPUContext* /*device_context*/) {
+    ConstEigenVectorArrayMap<T> dy_arr(dy, n);
+    ConstEigenVectorArrayMap<T> y_arr(y, n);
+    EigenVectorMap<T>(dx, n) = dy_arr * (1 - y_arr * y_arr);
   }
 };
 
-namespace {
 REGISTER_CPU_OPERATOR(
-    Tanh, UnaryElementwiseOp<float, CPUContext, TanhCPUFunctor<float> >);
+    Tanh, UnaryElementwiseOp<TensorTypes<float>, CPUContext, TanhCPUFunctor>);
 REGISTER_CPU_OPERATOR(
-    TanhGradient, BinaryElementwiseOp<float, CPUContext,
-                                     TanhGradientCPUFunctor<float> >);
+    TanhGradient,
+    BinaryElementwiseOp<
+        TensorTypes<float>,
+        CPUContext,
+        WithoutBroadcast<TanhGradientCPUFunctor>>);
 
-struct GetTanhGradient : public GetGradientDefBase {
-  vector<OperatorDef>* Create(const OperatorDef& def) override {
+OPERATOR_SCHEMA(Tanh)
+  .NumInputs(1)
+  .NumOutputs(1)
+  .AllowInplace({{0, 0}})
+  .IdenticalTypeAndShape()
+  .SetDoc(R"DOC(
+Calculates the hyperbolic tangent of the given input tensor element-wise. This
+operation can be done in an in-place fashion too, by providing the same input
+and output blobs.
+)DOC")
+  .Input(0, "input", "1-D input tensor")
+  .Output(0, "output", "The hyperbolic tangent values of the input tensor "
+          "computed element-wise");
+
+OPERATOR_SCHEMA(TanhGradient).NumInputs(2).NumOutputs(1).AllowInplace({{1, 0}});
+
+class GetTanhGradient : public GradientMakerBase {
+  using GradientMakerBase::GradientMakerBase;
+  vector<OperatorDef> GetGradientDefs() override {
     return SingleGradientDef(
         "TanhGradient", "",
-        std::vector<string>{O(def, 0), GO(def, 0)},
-        std::vector<string>{GI(def, 0)});
+        std::vector<string>{O(0), GO(0)},
+        std::vector<string>{GI(0)});
   }
 };
 REGISTER_GRADIENT(Tanh, GetTanhGradient);
-}  // namespace
 }  // namespace caffe2

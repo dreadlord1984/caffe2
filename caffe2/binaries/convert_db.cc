@@ -1,3 +1,19 @@
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #include "caffe2/core/db.h"
 #include "caffe2/core/init.h"
 #include "caffe2/proto/caffe2.pb.h"
@@ -14,7 +30,7 @@ using caffe2::db::DB;
 using caffe2::db::Transaction;
 
 int main(int argc, char** argv) {
-  caffe2::GlobalInit(&argc, argv);
+  caffe2::GlobalInit(&argc, &argv);
 
   std::unique_ptr<DB> in_db(caffe2::db::CreateDB(
       caffe2::FLAGS_input_db_type, caffe2::FLAGS_input_db, caffe2::db::READ));
@@ -27,9 +43,9 @@ int main(int argc, char** argv) {
     transaction->Put(cursor->key(), cursor->value());
     if (++count % caffe2::FLAGS_batch_size == 0) {
       transaction->Commit();
-      CAFFE_LOG_INFO << "Converted " << count << " items so far.";
+      LOG(INFO) << "Converted " << count << " items so far.";
     }
   }
-  CAFFE_LOG_INFO << "A total of " << count << " items processed.";
+  LOG(INFO) << "A total of " << count << " items processed.";
   return 0;
 }

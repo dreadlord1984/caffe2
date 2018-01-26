@@ -1,3 +1,19 @@
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #include <cuda.h>
 #include <thrust/device_vector.h>
 #include <thrust/transform_reduce.h>
@@ -76,7 +92,7 @@ template<>
 bool SummarizeOp<float, CUDAContext>::RunOnDevice() {
   auto& X = Input(0);
   const int N = X.size();
-  CAFFE_DCHECK_GT(N, 0);
+  DCHECK_GT(N, 0);
 
   // TODO(Yangqing): Any better way to avoid having to const cast?
   thrust::device_ptr<float> Xdata(const_cast<float*>(X.data<float>()));
@@ -87,7 +103,7 @@ bool SummarizeOp<float, CUDAContext>::RunOnDevice() {
   // compute summary statistics
   SummaryStatsData<float> result = thrust::transform_reduce(
 #if THRUST_VERSION >= 100800
-      thrust::cuda::par.on(device_context_.cuda_stream()),
+      thrust::cuda::par.on(context_.cuda_stream()),
 #endif  // THRUST_VERSION >= 100800
       Xdata, Xdata + N, unary_op, init, binary_op);
   float standard_deviation = std::sqrt(result.variance());
@@ -97,16 +113,14 @@ bool SummarizeOp<float, CUDAContext>::RunOnDevice() {
   }
   if (OutputSize()) {
     auto* Y = OperatorBase::Output<TensorCUDA>(0);
-    Y->Reshape(std::vector<int>{4});
+    Y->Resize(4);
     float output_buffer[NUM_STATS] = {result.min, result.max, result.mean,
                                standard_deviation};
-    device_context_.Copy<float, CPUContext, CUDAContext>(
+    context_.Copy<float, CPUContext, CUDAContext>(
         NUM_STATS, output_buffer, Y->mutable_data<float>());
   }
   return true;
 }
 
-namespace {
 REGISTER_CUDA_OPERATOR(Summarize, SummarizeOp<float, CUDAContext>);
-}  // namespace
 }  // namespace caffe2

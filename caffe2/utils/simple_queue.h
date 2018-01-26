@@ -1,3 +1,19 @@
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #ifndef CAFFE2_UTILS_SIMPLE_QUEUE_H_
 #define CAFFE2_UTILS_SIMPLE_QUEUE_H_
 
@@ -36,13 +52,18 @@ class SimpleQueue {
     return true;
   }
 
+  int size() {
+    std::unique_lock<std::mutex> mutex_lock(mutex_);
+    return queue_.size();
+  }
+
   // Push pushes a value to the queue.
   void Push(const T& value) {
-    std::unique_lock<std::mutex> mutex_lock(mutex_);
-    CAFFE_CHECK(!no_more_jobs_)
-        << "Cannot push to a closed queue.";
-    queue_.push(value);
-    mutex_lock.unlock();
+    {
+      std::lock_guard<std::mutex> mutex_lock(mutex_);
+      CAFFE_ENFORCE(!no_more_jobs_, "Cannot push to a closed queue.");
+      queue_.push(value);
+    }
     cv_.notify_one();
   }
 
@@ -53,9 +74,10 @@ class SimpleQueue {
   // by the Pop() functions, any more Pop() function will immediately return
   // false with nothing set to the value.
   void NoMoreJobs() {
-    std::unique_lock<std::mutex> mutex_lock(mutex_);
-    no_more_jobs_ = true;
-    mutex_lock.unlock();
+    {
+      std::lock_guard<std::mutex> mutex_lock(mutex_);
+      no_more_jobs_ = true;
+    }
     cv_.notify_all();
   }
 
@@ -65,7 +87,7 @@ class SimpleQueue {
   std::queue<T> queue_;
   bool no_more_jobs_;
   // We do not allow copy constructors.
-  SimpleQueue(const SimpleQueue& src) {}
+  SimpleQueue(const SimpleQueue& /*src*/) {}
 };
 
 }  // namespace caffe2

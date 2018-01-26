@@ -1,17 +1,41 @@
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #ifndef CAFFE2_OPERATORS_CONV_POOL_OP_BASE_H_
 #define CAFFE2_OPERATORS_CONV_POOL_OP_BASE_H_
 
+#include <vector>
+
 #include "caffe2/core/context.h"
+#include "caffe2/core/logging.h"
 #include "caffe2/core/operator.h"
 #include "caffe2/proto/caffe2_legacy.pb.h"
 #include "caffe2/utils/math.h"
-#include "caffe2/core/logging.h"
 
 // This macro is here just to allow us to experiment with padding values that
 // determines, when we have an odd number of pads, which side gets the one
 // additional pad value, the head side, or the tail side. Setting it to false
-// will enable the distbelief behavior, and setting it to true will enable
+// will enable the TensorFlow behavior, and setting it to true will enable
 // a behavior more consistent with Caffe and CuDNN.
+// This only affects the case when you set legacy pad to VALID or SAME. The
+// behavior inherits from the early designs of Google's CNN implementation,
+// where padding values are implicitly calculated instead of explicitly
+// specified. This is still the case with TensorFlow. Many frameworks have
+// followed a slightly different approach of explicitly giving padding values,
+// in which case the value of this constant value does not matter.
 const bool CAFFE2_PAD_HEAD_MORE = false;
 
 namespace caffe2 {
@@ -22,201 +46,679 @@ class ConvPoolOpBase : public Operator<Context> {
   USE_OPERATOR_CONTEXT_FUNCTIONS;
   ConvPoolOpBase(const OperatorDef& operator_def, Workspace* ws)
       : Operator<Context>(operator_def, ws),
-        legacy_pad_(static_cast<LegacyPadding>(
-            OperatorBase::GetSingleArgument<int>(
-                "legacy_pad", LegacyPadding::NOTSET))),
-        pad_(OperatorBase::GetSingleArgument<int>("pad", 0)),
-        pad_t_(OperatorBase::GetSingleArgument<int>("pad_t", pad_)),
-        pad_l_(OperatorBase::GetSingleArgument<int>("pad_l", pad_)),
-        pad_b_(OperatorBase::GetSingleArgument<int>("pad_b", pad_)),
-        pad_r_(OperatorBase::GetSingleArgument<int>("pad_r", pad_)),
-        kernel_h_(OperatorBase::GetSingleArgument<int>(
-            "kernel_h", OperatorBase::GetSingleArgument<int>("kernel", 0))),
-        kernel_w_(OperatorBase::GetSingleArgument<int>(
-            "kernel_w", OperatorBase::GetSingleArgument<int>("kernel", 0))),
-        stride_h_(OperatorBase::GetSingleArgument<int>(
-            "stride_h", OperatorBase::GetSingleArgument<int>("stride", 1))),
-        stride_w_(OperatorBase::GetSingleArgument<int>(
-            "stride_w", OperatorBase::GetSingleArgument<int>("stride", 1))),
+        legacy_pad_(
+            static_cast<LegacyPadding>(OperatorBase::GetSingleArgument<int>(
+                "legacy_pad",
+                LegacyPadding::NOTSET))),
+        global_pooling_(
+            OperatorBase::GetSingleArgument<int>("global_pooling", 0)),
+        kernel_(OperatorBase::GetRepeatedArgument<int>("kernels")),
+        dilation_(OperatorBase::GetRepeatedArgument<int>("dilations")),
+        stride_(OperatorBase::GetRepeatedArgument<int>("strides")),
+        pads_(OperatorBase::GetRepeatedArgument<int>("pads")),
+        group_(OperatorBase::GetSingleArgument<int>("group", 1)),
         order_(StringToStorageOrder(
-            OperatorBase::GetSingleArgument<string>("order", "NCHW"))) {
-    CAFFE_CHECK_GT(kernel_h_, 0);
-    CAFFE_CHECK_GT(kernel_w_, 0);
+            OperatorBase::GetSingleArgument<string>("order", "NCHW"))),
+        shared_buffer_(
+            OperatorBase::GetSingleArgument<int>("shared_buffer", 0)),
+        ws_(ws) {
     // For the padding, they should either be the legacy padding strategy
     // (VALID or SAME), or an explicit, non-negative value.
     if (legacy_pad_ == LegacyPadding::VALID ||
         legacy_pad_ == LegacyPadding::SAME) {
-      CAFFE_CHECK(!OperatorBase::HasArgument("pad") &&
-            !OperatorBase::HasArgument("pad_t") &&
-            !OperatorBase::HasArgument("pad_l") &&
-            !OperatorBase::HasArgument("pad_b") &&
-            !OperatorBase::HasArgument("pad_r"))
-          << "If you use legacy padding VALID or SAME, you should not specify "
-             "any specific padding values.";
+      CAFFE_ENFORCE(
+          !OperatorBase::HasArgument("pads"),
+          "If you use legacy padding VALID or SAME, you should not specify "
+          "any specific padding values.");
     }
-    CAFFE_CHECK_GE(pad_, 0);
-    CAFFE_CHECK_GE(pad_t_, 0);
-    CAFFE_CHECK_GE(pad_l_, 0);
-    CAFFE_CHECK_GE(pad_b_, 0);
-    CAFFE_CHECK_GE(pad_r_, 0);
-    CAFFE_CHECK_GT(stride_h_, 0);
-    CAFFE_CHECK_GT(stride_w_, 0);
+
+    // Get old arguments values.
+    if (OperatorBase::HasArgument("kernel")) {
+      kernel_.resize(2, OperatorBase::GetSingleArgument<int>("kernel", 0));
+    } else if (
+        OperatorBase::HasArgument("kernel_h") &&
+        OperatorBase::HasArgument("kernel_w")) {
+      kernel_.push_back(OperatorBase::GetSingleArgument<int>("kernel_h", 0));
+      kernel_.push_back(OperatorBase::GetSingleArgument<int>("kernel_w", 0));
+    }
+
+    if (OperatorBase::HasArgument("stride")) {
+      stride_.resize(2, OperatorBase::GetSingleArgument<int>("stride", 0));
+    } else if (
+        OperatorBase::HasArgument("stride_h") &&
+        OperatorBase::HasArgument("stride_w")) {
+      stride_.push_back(OperatorBase::GetSingleArgument<int>("stride_h", 0));
+      stride_.push_back(OperatorBase::GetSingleArgument<int>("stride_w", 0));
+    }
+
+    if (OperatorBase::HasArgument("dilation")) {
+      dilation_.resize(2, OperatorBase::GetSingleArgument<int>("dilation", 0));
+    } else if (
+        OperatorBase::HasArgument("dilation_h") &&
+        OperatorBase::HasArgument("dilation_w")) {
+      dilation_.push_back(
+          OperatorBase::GetSingleArgument<int>("dilation_h", 0));
+      dilation_.push_back(
+          OperatorBase::GetSingleArgument<int>("dilation_w", 0));
+    }
+
+    if (OperatorBase::HasArgument("pad")) {
+      CAFFE_ENFORCE(
+          legacy_pad_ != LegacyPadding::VALID &&
+              legacy_pad_ != LegacyPadding::SAME,
+          "If you use legacy padding VALID or SAME, you should not specify "
+          "any specific padding values.");
+      pads_.resize(4, OperatorBase::GetSingleArgument<int>("pad", 0));
+    } else if (
+        OperatorBase::HasArgument("pad_t") &&
+        OperatorBase::HasArgument("pad_l") &&
+        OperatorBase::HasArgument("pad_b") &&
+        OperatorBase::HasArgument("pad_r")) {
+      CAFFE_ENFORCE(
+          legacy_pad_ != LegacyPadding::VALID &&
+              legacy_pad_ != LegacyPadding::SAME,
+          "If you use legacy padding VALID or SAME, you should not specify "
+          "any specific padding values.");
+      pads_.push_back(OperatorBase::GetSingleArgument<int>("pad_t", 0));
+      pads_.push_back(OperatorBase::GetSingleArgument<int>("pad_l", 0));
+      pads_.push_back(OperatorBase::GetSingleArgument<int>("pad_b", 0));
+      pads_.push_back(OperatorBase::GetSingleArgument<int>("pad_r", 0));
+    }
+
+    // Fill default values.
+    if (kernel_.size() == 0) {
+      kernel_.assign({0, 0});
+    }
+
+    if (stride_.size() == 0) {
+      stride_.resize(kernel_.size(), 1);
+    }
+
+    if (pads_.size() == 0) {
+      pads_.resize(kernel_.size() * 2, 0);
+    }
+
+    if (dilation_.size() == 0) {
+      dilation_.resize(kernel_.size(), 1);
+    }
+
+    CAFFE_ENFORCE_EQ(stride_.size(), kernel_.size());
+    CAFFE_ENFORCE_EQ(dilation_.size(), kernel_.size());
+
+    if (legacy_pad_ != LegacyPadding::VALID &&
+        legacy_pad_ != LegacyPadding::SAME) {
+      CAFFE_ENFORCE_EQ(pads_.size(), 2 * kernel_.size());
+    }
+
+    if (global_pooling_) {
+      for (int dim = 0; dim < kernel_.size(); ++dim) {
+        CAFFE_ENFORCE(
+            pads_[2 * dim] == 0 && pads_[2 * dim + 1] == 0 &&
+                dilation_[dim] == 1 && stride_[dim] == 1,
+            "If global_pooling is set pad, dilation and stride shouldn't be set.");
+      }
+    }
+
+    AllocateAndCopy(kernel_, kernel_device_);
+    AllocateAndCopy(stride_, stride_device_);
+    AllocateAndCopy(dilation_, dilation_device_);
+    AllocateAndCopy(pads_, pads_device_);
+
+    // Check kernel only if we are doing conv or pooling. The reason is that a
+    // few other ops, like PadImage, are also using this base class. We really
+    // need to clean this up.
+    if (operator_def.name().find("Conv") == 0 ||
+        operator_def.name().find("Pool") != std::string::npos) {
+      for (int dim = 0; dim < kernel_.size(); ++dim) {
+        CAFFE_ENFORCE_GE(pads_[dim], 0);
+        CAFFE_ENFORCE_GE(pads_[kernel_.size() + dim], 0);
+        CAFFE_ENFORCE(
+            kernel_[dim],
+            "If you are doing convolution or pooling, you will need to set "
+            "explicitly the kernel size.");
+      }
+    }
+
+    for (int dim = 0; dim < kernel_.size(); ++dim) {
+      CAFFE_ENFORCE_GE(kernel_[dim], 0);
+      CAFFE_ENFORCE_GE(dilation_[dim], 0);
+      CAFFE_ENFORCE_GE(stride_[dim], 0);
+    }
+
+    if (group_ != 1) {
+      for (int dim = 0; dim < kernel_.size(); ++dim) {
+        CAFFE_ENFORCE_EQ(
+            dilation_[dim],
+            1,
+            "When group is used, dilation should not be set at the same time.");
+      }
+    }
+  }
+
+  // Returns the input image dimensions for the current storage order type.
+  vector<int> GetDims(const Tensor<Context>& input) {
+    vector<int> dims;
+    switch (order_) {
+      case StorageOrder::NCHW:
+        dims.assign(input.dims().begin() + 2, input.dims().end());
+        break;
+      case StorageOrder::NHWC:
+        dims.assign(input.dims().begin() + 1, input.dims().end() - 1);
+        break;
+      default:
+        CAFFE_THROW("Unknown storage order : ", order_);
+    }
+    return dims;
+  }
+
+  // Returns the size of the input image for the current storage type.
+  int GetDimsSize(const Tensor<Context>& input) {
+    int size = 0;
+    switch (order_) {
+      case StorageOrder::NCHW:
+        size = std::accumulate(
+            input.dims().begin() + 2,
+            input.dims().end(),
+            1,
+            std::multiplies<int>());
+        break;
+      case StorageOrder::NHWC:
+        size = std::accumulate(
+            input.dims().begin() + 1,
+            input.dims().end() - 1,
+            1,
+            std::multiplies<int>());
+        break;
+      default:
+        CAFFE_THROW("Unknown storage order : ", order_);
+    }
+    return size;
   }
 
   // Sets the output size. The output channel is manually provided since
   // it may not be identical to the input channels.
   // This function can be used in the forward functions to obtain the output
   // sizes.
-  void SetOutputSize(const Tensor<Context>& input,
-                     Tensor<Context>* output,
-                     int output_channel) {
-    CAFFE_DCHECK_EQ(input.ndim(), 4);
-    CAFFE_DCHECK_GT(input.size(), 0);
-    int N = input.dim(0);
-    bool channel_first = false;  // initialized to suppress compiler warning.
-    int C = 0, H = 0, W = 0;  // initialized to suppress compiler warning.
-    switch (order_) {
-    case StorageOrder::NHWC:
-      channel_first = false;
-      H = input.dim(1);
-      W = input.dim(2);
-      C = input.dim(3);
-      break;
-    case StorageOrder::NCHW:
-      // Old Caffe order.
-      channel_first = true;
-      C = input.dim(1);
-      H = input.dim(2);
-      W = input.dim(3);
-      break;
-    default:
-      CAFFE_LOG_FATAL << "Unknown Storage order: " << order_;
-    }
-    CAFFE_CHECK_GE(H, kernel_h_);
-    CAFFE_CHECK_GE(W, kernel_w_);
-    int output_height, output_width;
-    ComputeSizeAndPad(H, stride_h_, kernel_h_,
-                      &pad_t_, &pad_b_, &output_height);
-    ComputeSizeAndPad(W, stride_w_, kernel_w_,
-                      &pad_l_, &pad_r_, &output_width);
+  // Note(jiayq): the templatization of this function is mainly to help
+  // implementations that do not use first-class Tensor objects, such as the
+  // MKL operator. One can still call this function with dummy
+  // Tensor<CPUContext> objects in order to obtain the sizes.
+  template <typename AlternativeContext>
+  void SetOutputSize(
+      const Tensor<AlternativeContext>& input,
+      Tensor<AlternativeContext>* output,
+      int output_channel) {
+    CAFFE_ENFORCE(input.size() > 0);
+    vector<int> output_dims;
+    int N = input.dim32(0);
+    bool channel_first;
+    InferOutputSize(
+        input.dims(),
+        output_channel,
+        order_,
+        global_pooling_,
+        legacy_pad_,
+        N,
+        kernel_,
+        output_dims,
+        dilation_,
+        stride_,
+        pads_,
+        channel_first);
+
     if (channel_first) {
-      output->Reshape(N, output_channel, output_height, output_width);
+      output_dims.insert(output_dims.begin(), {N, output_channel});
     } else {
-      output->Reshape(N, output_height, output_width, output_channel);
+      output_dims.insert(output_dims.begin(), N);
+      output_dims.push_back(output_channel);
     }
-    //CAFFE_VLOG(2) << "In: N " << N << " C " << C << " H " << H << " W " << W;
-    //CAFFE_VLOG(2) << "Out: C " << output_channel << " H " << output_height
-    //        << " W " << output_width;
+    output->Resize(output_dims);
+  }
+
+  // Helper function that is also called from OperatorSchema. Modified
+  // kernel parameters and output output_dims and channel_first.
+  static inline void InferOutputSize(
+      vector<TIndex> input_dims,
+      int /*output_channel*/,
+      StorageOrder order,
+      bool global_pooling,
+      LegacyPadding legacy_pad,
+      int /*N*/,
+      vector<int>& kernel,
+      vector<int>& output_dims,
+      const vector<int>& dilation,
+      const vector<int>& stride,
+      vector<int>& pads,
+      bool& channel_first) {
+    channel_first = false; // initialized to suppress compiler warning.
+    vector<TIndex> dims;
+    switch (order) {
+      case StorageOrder::NHWC:
+        channel_first = false;
+        dims.assign(input_dims.begin() + 1, input_dims.end() - 1);
+        break;
+      case StorageOrder::NCHW:
+        // Old Caffe order.
+        channel_first = true;
+        dims.assign(input_dims.begin() + 2, input_dims.end());
+        break;
+      default:
+        CAFFE_THROW("Unknown Storage order: ", order);
+    }
+
+    if (global_pooling) {
+      kernel.assign(dims.begin(), dims.end());
+      output_dims.assign(dims.size(), 1);
+    } else {
+      for (int dim = 0; dim < dims.size(); ++dim) {
+        int dim_size = 0;
+        ComputeSizeAndPad(
+            dims[dim],
+            stride[dim],
+            kernel[dim],
+            dilation[dim],
+            legacy_pad,
+            &pads[dim],
+            &pads[dims.size() + dim],
+            &dim_size);
+        output_dims.push_back(dim_size);
+      }
+    }
   }
 
   // ComputePads could be used in backward functions to figure out the padding
   // values for the given input.
-  void ComputePads(const int height, const int width) {
-    if (legacy_pad_ != LegacyPadding::NOTSET) {
+  void ComputePads(const vector<int>& dims) {
+    if (global_pooling_) {
+      kernel_ = dims;
+    } else if (legacy_pad_ != LegacyPadding::NOTSET) {
       int output_unused;
-      ComputeSizeAndPad(height, stride_h_, kernel_h_,
-                        &pad_t_, &pad_b_, &output_unused);
-      ComputeSizeAndPad(width, stride_w_, kernel_w_,
-                        &pad_l_, &pad_r_, &output_unused);
+      for (int dim = 0; dim < dims.size(); ++dim) {
+        ComputeSizeAndPad(
+            dims[dim],
+            stride_[dim],
+            kernel_[dim],
+            dilation_[dim],
+            legacy_pad_,
+            &pads_[dim],
+            &pads_[dims.size() + dim],
+            &output_unused);
+      }
+    }
+  }
+
+  void SetDeviceTensor(const std::vector<int>& data, Tensor<Context>* tensor) {
+    if (tensor->size() != data.size()) {
+      tensor->Resize(data.size());
+      context_.template Copy<int, CPUContext, Context>(
+          data.size(), data.data(), tensor->template mutable_data<int>());
+    }
+  }
+
+  template <typename T>
+  void SetBiasMultiplier(const int size, Tensor<Context>* bias_multiplier_) {
+    if (bias_multiplier_->size() != size) {
+      // If the helper bias multiplier is not image size, reshape and fill it
+      // with one.
+      bias_multiplier_->Resize(std::vector<TIndex>{size});
+      math::Set<T, Context>(
+          size,
+          static_cast<T>(1),
+          bias_multiplier_->template mutable_data<T>(),
+          &context_);
     }
   }
 
   bool RunOnDevice() override {
-    switch (order_) {
-    case StorageOrder::NHWC:
-      //CAFFE_VLOG(2) << "Running NHWC";
-      return RunOnDeviceWithOrderNHWC();
-    case StorageOrder::NCHW:
-      //CAFFE_VLOG(2) << "Running NCHW";
-      return RunOnDeviceWithOrderNCHW();
-    default:
-      CAFFE_LOG_FATAL << "Unknown storage order: " << order_;
+    if (!global_pooling_) {
+      for (int dim = 0; dim < kernel_.size(); ++dim) {
+        CAFFE_ENFORCE_GT(kernel_[dim], 0);
+      }
     }
-    // To suppress old compiler warnings
-    return true;
+    switch (order_) {
+      case StorageOrder::NHWC:
+        // VLOG(2) << "Running NHWC";
+        return RunOnDeviceWithOrderNHWC();
+      case StorageOrder::NCHW:
+        // VLOG(2) << "Running NCHW";
+        return RunOnDeviceWithOrderNCHW();
+      default:
+        CAFFE_THROW("Unknown Storage order: ", order_);
+    }
   }
 
   // The actual function that does the computation, if the different
   // storage order leads to different implementations.
-  virtual bool RunOnDeviceWithOrderNHWC() { NOT_IMPLEMENTED; return false; }
-  virtual bool RunOnDeviceWithOrderNCHW() { NOT_IMPLEMENTED; return false; }
+  virtual bool RunOnDeviceWithOrderNHWC() {
+    CAFFE_NOT_IMPLEMENTED;
+  }
+  virtual bool RunOnDeviceWithOrderNCHW() {
+    CAFFE_NOT_IMPLEMENTED;
+  }
 
-  virtual ~ConvPoolOpBase() {}
+  static struct OpSchema::Cost CostInferenceForConv(
+      const OperatorDef& def,
+      const vector<TensorShape>& inputs) {
+    struct OpSchema::Cost c;
+    const TensorShape X = inputs[0];
+    const TensorShape W = inputs[1];
+    const TensorShape Y = TensorInferenceForConv(def, inputs)[0];
 
- private:
-  // I put this private section before protected because these variables are
-  // going to be initialized before pad_t_ et al. However, a derivative class
-  // should never use these values. They should refer to pad_t et al. for the
-  // exact padding values. This isolates out the padding scheme that are growing
-  // unfortunately complex due to implementational differences from different
-  // frameworks.
-  LegacyPadding legacy_pad_;
-  int pad_;
+    ArgumentHelper helper(def);
+    const auto order =
+        StringToStorageOrder(helper.GetSingleArgument<string>("order", "NCHW"));
 
- protected:
-  int pad_t_;
-  int pad_l_;
-  int pad_b_;
-  int pad_r_;
-  int kernel_h_;
-  int kernel_w_;
-  int stride_h_;
-  int stride_w_;
-  StorageOrder order_;
-
-  inline void ComputeSizeAndPad(
-      const int in_size, const int stride, const int kernel,
-      int* pad_head, int* pad_tail, int* out_size) {
-    switch (legacy_pad_) {
-      case LegacyPadding::NOTSET:
-        // We will just use the direct padding head and tail values, but we
-        // will verify that they are non-negative.
-        CAFFE_CHECK_GE(*pad_head, 0);
-        CAFFE_CHECK_GE(*pad_tail, 0);
-        *out_size = static_cast<int>(
-            static_cast<float>(in_size + *pad_head + *pad_tail - kernel) / stride
-            + 1);
-        break;
-      case LegacyPadding::VALID:
-        *pad_head = 0;
-        *pad_tail = 0;
-        *out_size = (in_size - kernel) / stride + 1;
-        break;
-      case LegacyPadding::SAME:
-      {
-        int legacy_target_size = (in_size + stride - 1) / stride;
-        int pad_needed = (legacy_target_size - 1) * stride + kernel - in_size;
-        if (CAFFE2_PAD_HEAD_MORE) {
-          *pad_head = (pad_needed + 1) / 2;
-        } else {
-          *pad_head = pad_needed / 2;
-        }
-        *pad_tail = pad_needed - *pad_head;
-        *out_size = (in_size + pad_needed - kernel) / stride + 1;
-        break;
-      }
-      case LegacyPadding::CAFFE_LEGACY_POOLING:
-        CAFFE_LOG_FATAL << "CAFFE_LEGACY_POOLING is no longer supported.";
-        break;
+    unsigned long long Y_h;
+    unsigned long long Y_w;
+    unsigned long long kernel_h;
+    unsigned long long kernel_w;
+    unsigned long long in_channels;
+    unsigned long long out_channels;
+    if (order == StorageOrder::NHWC) {
+      Y_h = Y.dims(1);
+      Y_w = Y.dims(2);
+      kernel_h = W.dims(1);
+      kernel_w = W.dims(2);
+      in_channels = W.dims(3);
+      out_channels = W.dims(0);
+    } else {
+      Y_h = Y.dims(2);
+      Y_w = Y.dims(3);
+      kernel_h = W.dims(2);
+      kernel_w = W.dims(3);
+      in_channels = W.dims(1);
+      out_channels = W.dims(0);
     }
+    c.flops = Y_h * Y_w * kernel_w * kernel_h * in_channels * out_channels * 2;
+    return c;
+  }
+
+  static vector<TensorShape> TensorInferenceForSchema(
+      const OperatorDef& def,
+      const vector<TensorShape>& in,
+      int output_channel) {
+    ArgumentHelper helper(def);
+    CAFFE_ENFORCE_GT(in.size(), 0);
+    CAFFE_ENFORCE_GT(in[0].dims_size(), 0);
+    int N = in[0].dims(0);
+    bool channel_first;
+
+    vector<int> pads = helper.GetRepeatedArgument<int>("pads");
+    vector<int> kernel = helper.GetRepeatedArgument<int>("kernels");
+    vector<int> strides = helper.GetRepeatedArgument<int>("strides");
+    vector<int> dilations = helper.GetRepeatedArgument<int>("dilation");
+
+    if (helper.HasArgument("pad")) {
+      pads.resize(4, helper.GetSingleArgument<int>("pad", 0));
+    } else if (
+        helper.HasArgument("pad_t") && helper.HasArgument("pad_l") &&
+        helper.HasArgument("pad_b") && helper.HasArgument("pad_r")) {
+      pads.push_back(helper.GetSingleArgument<int>("pad_t", 0));
+      pads.push_back(helper.GetSingleArgument<int>("pad_l", 0));
+      pads.push_back(helper.GetSingleArgument<int>("pad_b", 0));
+      pads.push_back(helper.GetSingleArgument<int>("pad_r", 0));
+    }
+
+    if (helper.HasArgument("kernel")) {
+      kernel.resize(2, helper.GetSingleArgument<int>("kernel", 1));
+    } else if (
+        helper.HasArgument("kernel_h") && helper.HasArgument("kernel_w")) {
+      kernel.push_back(helper.GetSingleArgument<int>("kernel_h", 1));
+      kernel.push_back(helper.GetSingleArgument<int>("kernel_w", 1));
+    }
+
+    if (helper.HasArgument("stride")) {
+      strides.resize(2, helper.GetSingleArgument<int>("stride", 1));
+    } else if (
+        helper.HasArgument("stride_h") && helper.HasArgument("stride_w")) {
+      strides.push_back(helper.GetSingleArgument<int>("stride_h", 1));
+      strides.push_back(helper.GetSingleArgument<int>("stride_w", 1));
+    }
+
+    if (helper.HasArgument("dilation")) {
+      strides.resize(2, helper.GetSingleArgument<int>("dilation", 1));
+    } else if (
+        helper.HasArgument("dilation_h") && helper.HasArgument("dilation_w")) {
+      strides.push_back(helper.GetSingleArgument<int>("dilation_h", 1));
+      strides.push_back(helper.GetSingleArgument<int>("dilation_w", 1));
+    }
+
+    auto check_and_set_default_value = [](
+        vector<int>& vec, int size, int value) {
+      if (vec.size() == 0) {
+        vec.resize(size, value);
+      }
+    };
+
+    check_and_set_default_value(pads, 4, 0);
+    check_and_set_default_value(kernel, 2, 1);
+    check_and_set_default_value(strides, 2, 1);
+    check_and_set_default_value(dilations, 2, 1);
+
+    vector<int> output_dims;
+    ConvPoolOpBase<CPUContext>::InferOutputSize(
+        GetDimsVector(in[0]),
+        output_channel,
+        StringToStorageOrder(helper.GetSingleArgument<string>("order", "NCHW")),
+        helper.GetSingleArgument<int>("global_pooling", 0),
+        static_cast<LegacyPadding>(
+            helper.GetSingleArgument<int>("legacy_pad", LegacyPadding::NOTSET)),
+        N,
+        kernel,
+        output_dims,
+        dilations,
+        strides,
+        pads,
+        channel_first);
+    vector<TensorShape> out(1);
+    if (channel_first) {
+      output_dims.insert(output_dims.begin(), {N, output_channel});
+    } else {
+      output_dims.push_back(output_channel);
+      output_dims.insert(output_dims.begin(), N);
+   }
+
+   out[0] = CreateTensorShape(output_dims, TensorProto::FLOAT);
+   return out;
+ }
+
+ static vector<TensorShape> TensorInferenceForConv(
+   const OperatorDef& def,
+   const vector<TensorShape>& in) {
+   return TensorInferenceForSchema(def, in, in[1].dims(0));
+ }
+
+ static vector<TensorShape> TensorInferenceForPool(
+     const OperatorDef& def,
+     const vector<TensorShape>& in) {
+   ArgumentHelper helper(def);
+   auto order =
+       StringToStorageOrder(helper.GetSingleArgument<string>("order", "NCHW"));
+   int num_channels =
+       (order == StorageOrder::NCHW ? in[0].dims(1) : in[0].dims(3));
+   return TensorInferenceForSchema(def, in, num_channels);
+ }
+
+ virtual ~ConvPoolOpBase() {}
+
+protected:
+ LegacyPadding legacy_pad_;
+ bool global_pooling_;
+ vector<int> kernel_;
+ vector<int> dilation_;
+ vector<int> stride_;
+ vector<int> pads_;
+
+ // We need the above parameters to be available for the devices.
+ Tensor<Context> kernel_device_;
+ Tensor<Context> dilation_device_;
+ Tensor<Context> stride_device_;
+ Tensor<Context> pads_device_;
+
+ int group_;
+ StorageOrder order_;
+ bool shared_buffer_;
+ Workspace* ws_;
+
+ static inline void ComputeSizeAndPad(
+     const int in_size,
+     const int stride,
+     const int kernel,
+     const int dilation,
+     LegacyPadding legacy_pad,
+     int* pad_head,
+     int* pad_tail,
+     int* out_size) {
+   const int dkernel = dilation * (kernel - 1) + 1;
+   switch (legacy_pad) {
+     case LegacyPadding::NOTSET:
+       // We will just use the direct padding head and tail values, but we
+       // will verify that they are non-negative.
+       CAFFE_ENFORCE_GE(in_size + *pad_head + *pad_tail, dkernel);
+       *out_size = static_cast<int>(
+           static_cast<float>(in_size + *pad_head + *pad_tail - dkernel) /
+               stride +
+           1);
+       break;
+     case LegacyPadding::VALID:
+       *pad_head = 0;
+       *pad_tail = 0;
+       *out_size = (in_size - dkernel) / stride + 1;
+       break;
+     case LegacyPadding::SAME: {
+       CAFFE_ENFORCE(
+           1 == dilation, "Dilation not supported for legacy padding.");
+       int legacy_target_size = (in_size + stride - 1) / stride;
+       int pad_needed = (legacy_target_size - 1) * stride + kernel - in_size;
+       if (CAFFE2_PAD_HEAD_MORE) {
+         *pad_head = (pad_needed + 1) / 2;
+       } else {
+         *pad_head = pad_needed / 2;
+       }
+       *pad_tail = pad_needed - *pad_head;
+       *out_size = (in_size + pad_needed - dkernel) / stride + 1;
+       break;
+     }
+     case LegacyPadding::CAFFE_LEGACY_POOLING:
+       // This is in order to adapt Caffe's pooling padding case. In this case,
+       // we will only use pad_head and will compute pad_tail to match the
+       // old caffe pooling strategy. Also see caffe2_legacy.proto for more
+       // details.
+       CAFFE_ENFORCE_GE(*pad_head, 0);
+       // Here, notice that caffe casts UP while caffe2 casts DOWN for the
+       // output size computation.
+       *out_size = std::ceil(
+           static_cast<float>(in_size + *pad_head * 2 - kernel) / stride + 1);
+       // If we have padding, caffe also ensures that the last pooling starts
+       // strictly inside the image (instead of at the padding); otherwise clip
+       // the last.
+       if (*pad_head > 0 && (*out_size - 1) * stride >= in_size + *pad_head) {
+         --*out_size;
+       }
+       // Now, compare the output size with the standard Caffe2 output size.
+       // The
+       // caffe2 standard output size should always be no larger than the
+       // output
+       // size of caffe.
+       int standard_out_size = static_cast<int>(
+           static_cast<float>(in_size + *pad_head * 2 - kernel) / stride + 1);
+       CAFFE_ENFORCE_GE(
+           *out_size,
+           standard_out_size,
+           "This should never happen. If this happens, double check the logic "
+           "above.");
+       if (*out_size > standard_out_size) {
+         LOG(WARNING)
+             << "You are hitting a case where Caffe's legacy padding calculation "
+                "is hit. This leads to inefficient and sometimes incorrect "
+                "results. We are keeping this behavior for backward compatibility"
+                ", but you are strongly recommended to move away from it.";
+       }
+       *pad_tail = *pad_head + stride * (*out_size - standard_out_size);
+       break;
+   }
+  }
+
+  // Accessors for 2D conv params.
+
+  inline int pad_t() const {
+    return pads_[0];
+  }
+
+  inline int pad_l() const {
+    return pads_[1];
+  }
+
+  inline int pad_b() const {
+    return pads_[2];
+  }
+
+  inline int pad_r() const {
+    return pads_[3];
+  }
+
+  inline int kernel_h() const {
+    return kernel_[0];
+  }
+
+  inline int kernel_w() const {
+    return kernel_[1];
+  }
+
+  inline int stride_h() const {
+    return stride_[0];
+  }
+
+  inline int stride_w() const {
+    return stride_[1];
+  }
+
+  inline int dilation_h() const {
+    return dilation_[0];
+  }
+
+  inline int dilation_w() const {
+    return dilation_[1];
   }
 
  private:
-  DISABLE_COPY_AND_ASSIGN(ConvPoolOpBase);
+ inline void AllocateAndCopy(const vector<int>& vec, Tensor<Context>& tensor) {
+      tensor.Resize(vec.size());
+      context_.template Copy<int, CPUContext, Context>(
+          vec.size(), vec.data(), tensor.template mutable_data<int>());
+ }
+
+#define USE_CONV_POOL_BASE_FUNCTIONS(Context)      \
+  USE_OPERATOR_FUNCTIONS(Context);                 \
+  using ConvPoolOpBase<Context>::pads_;            \
+  using ConvPoolOpBase<Context>::pads_device_;     \
+  using ConvPoolOpBase<Context>::pad_t;            \
+  using ConvPoolOpBase<Context>::pad_l;            \
+  using ConvPoolOpBase<Context>::pad_b;            \
+  using ConvPoolOpBase<Context>::pad_r;            \
+  using ConvPoolOpBase<Context>::legacy_pad_;      \
+  using ConvPoolOpBase<Context>::global_pooling_;  \
+  using ConvPoolOpBase<Context>::kernel_;          \
+  using ConvPoolOpBase<Context>::kernel_device_;   \
+  using ConvPoolOpBase<Context>::kernel_h;         \
+  using ConvPoolOpBase<Context>::kernel_w;         \
+  using ConvPoolOpBase<Context>::dilation_;        \
+  using ConvPoolOpBase<Context>::dilation_device_; \
+  using ConvPoolOpBase<Context>::dilation_h;       \
+  using ConvPoolOpBase<Context>::dilation_w;       \
+  using ConvPoolOpBase<Context>::stride_;          \
+  using ConvPoolOpBase<Context>::stride_device_;   \
+  using ConvPoolOpBase<Context>::stride_h;         \
+  using ConvPoolOpBase<Context>::stride_w;         \
+  using ConvPoolOpBase<Context>::group_;           \
+  using ConvPoolOpBase<Context>::order_;           \
+  using ConvPoolOpBase<Context>::shared_buffer_;   \
+  using ConvPoolOpBase<Context>::GetDims;          \
+  using ConvPoolOpBase<Context>::GetDimsSize;      \
+  using ConvPoolOpBase<Context>::SetDeviceTensor;  \
+  using ConvPoolOpBase<Context>::ws_
 };
 
-#define USE_CONV_POOL_BASE_FUNCTIONS                                           \
-  USE_OPERATOR_CONTEXT_FUNCTIONS;                                              \
-  using ConvPoolOpBase<Context>::pad_t_;                                       \
-  using ConvPoolOpBase<Context>::pad_l_;                                       \
-  using ConvPoolOpBase<Context>::pad_b_;                                       \
-  using ConvPoolOpBase<Context>::pad_r_;                                       \
-  using ConvPoolOpBase<Context>::kernel_h_;                                    \
-  using ConvPoolOpBase<Context>::kernel_w_;                                    \
-  using ConvPoolOpBase<Context>::stride_h_;                                    \
-  using ConvPoolOpBase<Context>::stride_w_;                                    \
-  using ConvPoolOpBase<Context>::order_
+} // namespace caffe2
 
-}  // namespace caffe2
-
-#endif  // CAFFE2_OPERATORS_CONV_POOL_OP_BASE_H_
+#endif // CAFFE2_OPERATORS_CONV_POOL_OP_BASE_H_

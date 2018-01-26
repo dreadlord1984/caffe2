@@ -1,148 +1,111 @@
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #ifndef CAFFE2_OPERATORS_TENSOR_PROTOS_DB_INPUT_H_
 #define CAFFE2_OPERATORS_TENSOR_PROTOS_DB_INPUT_H_
 
 #include <iostream>
+#include <mutex>
 
 #include "caffe2/core/db.h"
 #include "caffe2/operators/prefetch_op.h"
 
 namespace caffe2 {
 
-// tensor protos db input is the simplest input that basically reads
-// things from a db where each key-value pair stores a TensorProtos object.
-// These tensorprotos should have the same size, and they will be grouped into
-// batches of the given size. The output will simply be tensors of float data.
 template <class Context>
-class TensorProtosDBInput final
-    : public PrefetchOperator<Context> {
+class TensorProtosDBInput final : public PrefetchOperator<Context> {
  public:
   using OperatorBase::OutputSize;
   using PrefetchOperator<Context>::prefetch_thread_;
   explicit TensorProtosDBInput(const OperatorDef& operator_def, Workspace* ws);
   ~TensorProtosDBInput() {
-    if (prefetch_thread_.get() != nullptr) {
-      prefetch_thread_->join();
-    }
+    PrefetchOperator<Context>::Finalize();
   }
 
   bool Prefetch() override;
   bool CopyPrefetched() override;
 
  private:
-  unique_ptr<db::DB> db_;
-  unique_ptr<db::Cursor> cursor_;
   // Prefetch will always just happen on the CPU side.
-  vector<unique_ptr<Blob> > prefetched_blobs_;
-  vector<TensorProto::DataType> data_types_;
+  vector<Blob> prefetched_blobs_;
   int batch_size_;
-  string db_name_;
-  string db_type_;
-  DISABLE_COPY_AND_ASSIGN(TensorProtosDBInput);
+  bool shape_inferred_ = false;
+  string key_;
+  string value_;
 };
 
 template <class Context>
 TensorProtosDBInput<Context>::TensorProtosDBInput(
-      const OperatorDef& operator_def, Workspace* ws)
-      : PrefetchOperator<Context>(operator_def, ws),
-        batch_size_(
-            OperatorBase::template GetSingleArgument<int>("batch_size", 0)),
-        db_name_(
-            OperatorBase::template GetSingleArgument<string>("db", "")),
-        db_type_(OperatorBase::template GetSingleArgument<string>(
-            "db_type", "leveldb")) {
-  CAFFE_CHECK_GT(batch_size_, 0) << "Batch size should be nonnegative.";
-  CAFFE_CHECK_GT(db_name_.size(), 0) << "Must provide a leveldb name.";
-
-  db_.reset(db::CreateDB(db_type_, db_name_, db::READ));
-  cursor_.reset(db_->NewCursor());
-  cursor_->SeekToFirst();
-
-  // Now, we want to read a data point to initialize the contents.
-  TensorProtos protos;
-  protos.ParseFromString(cursor_->value());
-  CAFFE_CHECK_EQ(protos.protos_size(), OutputSize());
-  prefetched_blobs_.resize(protos.protos_size());
-  data_types_.resize(protos.protos_size());
-  CAFFE_VLOG(1) << "Figuring data types.";
-  for (int i = 0; i < protos.protos_size(); ++i) {
-    vector<int> dims;
-    for (const int dim : protos.protos(i).dims()) {
-      dims.push_back(dim);
-    }
-    dims[0] = batch_size_;
-    prefetched_blobs_[i].reset(new Blob());
-    Blob* blob = prefetched_blobs_[i].get();
-    data_types_[i] = protos.protos(i).data_type();
-    blob->GetMutable<TensorCPU>()->Reshape(dims);
-    switch (data_types_[i]) {
-    case TensorProto::FLOAT:
-      CAFFE_VLOG(1) << "Output " << i << ": float";
-      break;
-    case TensorProto::INT32:
-      CAFFE_VLOG(1) << "Output " << i << ": int";
-      break;
-    case TensorProto::BYTE:
-      CAFFE_VLOG(1) << "Output " << i << ": byte -> float";
-      break;
-    case TensorProto::STRING:
-      CAFFE_LOG_FATAL << "Not expecting string.";
-    }
-  }
-  cursor_->SeekToFirst();
-}
+    const OperatorDef& operator_def,
+    Workspace* ws)
+    : PrefetchOperator<Context>(operator_def, ws),
+      prefetched_blobs_(operator_def.output_size()),
+      batch_size_(
+          OperatorBase::template GetSingleArgument<int>("batch_size", 0)) {}
 
 template <class Context>
 bool TensorProtosDBInput<Context>::Prefetch() {
-  for (int item_id = 0; item_id < batch_size_; ++item_id) {
-    // CAFFE_LOG_INFO << "Prefetching item " << item_id;
-    // process data
+  const db::DBReader& reader = OperatorBase::Input<db::DBReader>(0);
+  TensorDeserializer<CPUContext> deserializer;
+  if (batch_size_ == 0) {
+    // We do not need to construct a batch. As a result, we will simply
+    // deserialize everything into the target prefetched blob.
+    reader.Read(&key_, &value_);
     TensorProtos protos;
-    protos.ParseFromString(cursor_->value());
-    // TODO(Yangqing): do we want to do anything to sanity check the data?
+    CAFFE_ENFORCE(protos.ParseFromString(value_));
+    CAFFE_ENFORCE(protos.protos_size() == OutputSize());
     for (int i = 0; i < protos.protos_size(); ++i) {
-      const TensorProto& proto = protos.protos(i);
-      Blob* blob = prefetched_blobs_[i].get();
-      CAFFE_DCHECK((blob->IsType<TensorCPU>()));
-      auto* tensor = blob->GetMutable<TensorCPU>();
-      switch (proto.data_type()) {
-      case TensorProto::FLOAT:
-      {
-        int single_size = proto.float_data_size();
-        CAFFE_CHECK_EQ(single_size * batch_size_, tensor->size());
-        memcpy(tensor->mutable_data<float>() + single_size * item_id,
-               proto.float_data().data(), single_size * sizeof(float));
-        break;
+      if (protos.protos(i).has_device_detail()) {
+        protos.mutable_protos(i)->clear_device_detail();
       }
-      case TensorProto::INT32:
-      {
-        int single_size = proto.int32_data_size();
-        CAFFE_CHECK_EQ(single_size * batch_size_, tensor->size());
-        int* dst_pointer = tensor->mutable_data<int>() + single_size * item_id;
-        for (int i = 0; i < single_size; ++i) {
-          dst_pointer[i] = proto.int32_data(i);
-        }
-        break;
-      }
-      case TensorProto::BYTE:
-      {
-        const string& src_data = proto.byte_data();
-        int single_size = src_data.size();
-        CAFFE_CHECK_EQ(single_size * batch_size_, tensor->size());
-        float* dst_pointer = tensor->mutable_data<float>() + single_size * item_id;
-        for (int i = 0; i < single_size; ++i) {
-          dst_pointer[i] =
-              static_cast<float>(static_cast<uint8_t>(src_data[i])) / 256.f;
-        }
-        break;
-      }
-      default:
-        CAFFE_LOG_ERROR << "Unknown input data type: " << proto.data_type();
-        return false;
-      }
+      deserializer.Deserialize(
+          protos.protos(i),
+          prefetched_blobs_[i].template GetMutable<TensorCPU>());
     }
-    cursor_->Next();
-    if (!cursor_->Valid()) {
-      cursor_->SeekToFirst();
+  } else {
+    vector<TensorCPU> temp_tensors(OutputSize());
+    for (int item_id = 0; item_id < batch_size_; ++item_id) {
+      reader.Read(&key_, &value_);
+      TensorProtos protos;
+      CAFFE_ENFORCE(protos.ParseFromString(value_));
+      CAFFE_ENFORCE(protos.protos_size() == OutputSize());
+      if (!shape_inferred_) {
+        // First, set the shape of all the blobs.
+        for (int i = 0; i < protos.protos_size(); ++i) {
+          vector<int> dims(
+              protos.protos(i).dims().begin(), protos.protos(i).dims().end());
+          dims.insert(dims.begin(), batch_size_);
+          prefetched_blobs_[i].template GetMutable<TensorCPU>()->Resize(dims);
+        }
+      }
+      for (int i = 0; i < protos.protos_size(); ++i) {
+        TensorCPU* dst = prefetched_blobs_[i].template GetMutable<TensorCPU>();
+        TensorCPU& src = temp_tensors[i];
+        if (protos.protos(i).has_device_detail()) {
+          protos.mutable_protos(i)->clear_device_detail();
+        }
+        deserializer.Deserialize(protos.protos(i), &src);
+        DCHECK_EQ(src.size() * batch_size_, dst->size());
+        this->context_.template CopyItems<CPUContext, CPUContext>(
+            src.meta(),
+            src.size(),
+            src.raw_data(),
+            static_cast<char*>(dst->raw_mutable_data(src.meta())) +
+                src.nbytes() * item_id);
+      }
     }
   }
   return true;
@@ -151,35 +114,12 @@ bool TensorProtosDBInput<Context>::Prefetch() {
 template <class Context>
 bool TensorProtosDBInput<Context>::CopyPrefetched() {
   for (int i = 0; i < OutputSize(); ++i) {
-    auto* output = OperatorBase::Output<Tensor<Context> >(i);
-    auto& input =
-        prefetched_blobs_[i]->template Get<TensorCPU>();
-    switch (data_types_[i]) {
-    case TensorProto::FLOAT:
-    case TensorProto::BYTE:
-    {
-      output->ReshapeLike(input);
-      this->device_context_.template Copy<float, CPUContext, Context>(
-          input.size(), input.template data<float>(),
-          output->template mutable_data<float>());
-      break;
-    }
-    case TensorProto::INT32:
-    {
-      output->ReshapeLike(input);
-      this->device_context_.template Copy<int, CPUContext, Context>(
-          input.size(), input.template data<int>(),
-          output->template mutable_data<int>());
-      break;
-    }
-    case TensorProto::STRING:
-      CAFFE_LOG_FATAL << "Not expecting string.";
-    }
+    OperatorBase::Output<Tensor<Context>>(i)->CopyFrom(
+        prefetched_blobs_[i].template Get<TensorCPU>(), &this->context_);
   }
   return true;
 }
 
+} // namespace caffe2
 
-}  // namespace caffe2
-
-#endif  // CAFFE2_OPERATORS_TENSOR_PROTOS_DB_INPUT_H_
+#endif // CAFFE2_OPERATORS_TENSOR_PROTOS_DB_INPUT_H_

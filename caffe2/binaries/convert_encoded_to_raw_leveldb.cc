@@ -1,3 +1,19 @@
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 // This script converts an image dataset to leveldb.
 //
 // caffe2::FLAGS_input_folder is the root folder that holds all the images, and
@@ -8,7 +24,6 @@
 
 #include <opencv2/opencv.hpp>
 
-#include <algorithm>
 #include <fstream>  // NOLINT(readability/streams)
 #include <memory>
 #include <random>
@@ -38,21 +53,21 @@ void ConvertToRawDataset(
     const string& input_db_name, const string& output_db_name) {
   // input leveldb
   std::unique_ptr<leveldb::DB> input_db;
-  CAFFE_LOG_INFO << "Opening input leveldb " << input_db_name;
+  LOG(INFO) << "Opening input leveldb " << input_db_name;
   {
     leveldb::Options options;
     options.create_if_missing = false;
     leveldb::DB* db_temp;
     leveldb::Status status = leveldb::DB::Open(
         options, input_db_name, &db_temp);
-    CAFFE_CHECK(status.ok()) << "Failed to open leveldb " << input_db_name << ".";
+    CAFFE_ENFORCE(status.ok(), "Failed to open leveldb ", input_db_name, ".");
     input_db.reset(db_temp);
   }
 
   // output leveldb
   std::unique_ptr<leveldb::DB> output_db;
   std::unique_ptr<leveldb::WriteBatch> batch;
-  CAFFE_LOG_INFO << "Opening leveldb " << output_db_name;
+  LOG(INFO) << "Opening leveldb " << output_db_name;
   {
     leveldb::Options options;
     options.error_if_exists = true;
@@ -61,8 +76,11 @@ void ConvertToRawDataset(
     leveldb::DB* db_temp;
     leveldb::Status status = leveldb::DB::Open(
         options, output_db_name, &db_temp);
-    CAFFE_CHECK(status.ok()) << "Failed to open leveldb " << output_db_name
-        << ". Is it already existing?";
+    CAFFE_ENFORCE(
+        status.ok(),
+        "Failed to open leveldb ",
+        output_db_name,
+        ". Is it already existing?");
     output_db.reset(db_temp);
   }
   batch.reset(new leveldb::WriteBatch());
@@ -84,7 +102,7 @@ void ConvertToRawDataset(
   iter->SeekToFirst();
   int count = 0;
   for (; iter->Valid(); iter->Next()) {
-    CAFFE_CHECK(input_protos.ParseFromString(iter->value().ToString()));
+    CAFFE_ENFORCE(input_protos.ParseFromString(iter->value().ToString()));
     label->CopyFrom(input_protos.protos(1));
     const string& encoded_image = input_protos.protos(0).string_data(0);
     int encoded_size = encoded_image.size();
@@ -108,7 +126,7 @@ void ConvertToRawDataset(
                  cv::INTER_LINEAR);
     data->set_dims(0, scaled_height);
     data->set_dims(1, scaled_width);
-    CAFFE_DCHECK(resized_img.isContinuous());
+    DCHECK(resized_img.isContinuous());
     data->set_byte_data(resized_img.ptr(),
                         scaled_height * scaled_width * (caffe2::FLAGS_color ? 3 : 1));
     output_protos.SerializeToString(&value);
@@ -117,21 +135,21 @@ void ConvertToRawDataset(
     if (++count % 1000 == 0) {
       output_db->Write(leveldb::WriteOptions(), batch.get());
       batch.reset(new leveldb::WriteBatch());
-      CAFFE_LOG_INFO << "Processed " << count << " files.";
+      LOG(INFO) << "Processed " << count << " files.";
     }
   }
   // write the last batch
   if (count % 1000 != 0) {
     output_db->Write(leveldb::WriteOptions(), batch.get());
   }
-  CAFFE_LOG_INFO << "Processed a total of " << count << " files.";
+  LOG(INFO) << "Processed a total of " << count << " files.";
 }
 
 }  // namespace caffe2
 
 
 int main(int argc, char** argv) {
-  caffe2::GlobalInit(&argc, argv);
+  caffe2::GlobalInit(&argc, &argv);
   caffe2::ConvertToRawDataset(
       caffe2::FLAGS_input_db_name, caffe2::FLAGS_output_db_name);
   return 0;
